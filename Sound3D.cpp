@@ -106,10 +106,18 @@ static void _InitializeAL()
 
 
 
+
+
+
 	SoundBuffer::SoundBuffer() // creates a new SoundBuffer object
 		: alBuffer(0), refCount(0)
 	{
 		if(!pDevice) _InitializeAL();
+	}
+	SoundBuffer::SoundBuffer(const char* file) : alBuffer(0), refCount(0)
+	{
+		if(!pDevice) _InitializeAL();
+		Load(file);
 	}
 	SoundBuffer::~SoundBuffer() // destroys and unloads this buffer
 	{
@@ -244,8 +252,11 @@ static void _InitializeAL()
 
 
 	SoundStream::SoundStream() // creates a new SoundStream object
-		//: alStreamBuffers()
 	{
+	}
+	SoundStream::SoundStream(const char* file)
+	{
+		Load(file);
 	}
 	SoundStream::~SoundStream() // destroys and unloads this SoundStream
 	{
@@ -557,11 +568,22 @@ static void _InitializeAL()
 		}
 	}
 
-	ManagedSoundStream::ManagedSoundStream() : SoundStream()
+	ManagedSoundStream::ManagedSoundStream()
+	{
+		_registerStream();
+	}
+
+	ManagedSoundStream::ManagedSoundStream(const char* file)
+	{
+		_registerStream();
+		Load(file);
+	}
+
+	void ManagedSoundStream::_registerStream()
 	{
 		if(!Mutex) 
 		{
-			Mutex = CreateMutex(0, TRUE, 0);
+			Mutex = CreateMutexA(0, TRUE, 0);
 			ThreadHandle = CreateThread(0, 0, &SoundStreamManager, 0, 0, &ThreadID);
 		}
 		WaitForSingleObject(Mutex, 100);

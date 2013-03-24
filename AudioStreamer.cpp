@@ -644,7 +644,7 @@ static void _InitVorbis()
 		FileHandle = (int*)ogg;
 
 		if(int err = oggv_open_callbacks(f, ogg, NULL, 0, cb)) {
-			const char* errmsg = "";
+			const char* errmsg;
 			switch(err) {
 			case OV_EREAD: errmsg = "Error reading OGG file!"; break;
 			case OV_ENOTVORBIS: errmsg = "Not an OGG vorbis file!"; break;

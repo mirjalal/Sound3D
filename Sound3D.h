@@ -48,6 +48,11 @@ protected:
 	
 public:
 	SoundBuffer();	// creates a new SoundBuffer object
+	/**
+	 * Creates a new SoundBuffer and loads the specified sound file
+	 * @param file Path to sound file to load
+	 */
+	SoundBuffer(const char* file);
 	virtual ~SoundBuffer(); // destroys and unloads this buffer
 
 	int Frequency() const;	// @return Frequency in Hz of this SoundBuffer data
@@ -116,6 +121,11 @@ protected:
 
 public:
 	SoundStream(); // creates a new SoundStream object
+	/**
+	 * Creates a new SoundStream object and loads the specified sound file
+	 * @param file Path to the sound file to load
+	 */
+	SoundStream(const char* file);
 	virtual ~SoundStream(); // destroys and unloads any resources held
 
 	/**
@@ -243,7 +253,15 @@ class ManagedSoundStream : public SoundStream
 {
 public:
 	ManagedSoundStream();
+	/**
+	 * Creates a new ManagedSoundStream object and loads the specified sound file
+	 * @param file Path to the sound file to load
+	 */
+	ManagedSoundStream(const char* file);
 	~ManagedSoundStream();
+
+private:
+	void _registerStream();
 };
 
 
