@@ -25,15 +25,10 @@ using namespace S3D;
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <vector>
-#include <algorithm> // remove_if
 #include <time.h>
 
-bool keyPress(int vkey) // TRUE if windows virtual key was pressed
-{
-	if(GetAsyncKeyState(vkey) & 0x0001) // is the least significant bit set?
-		return true; // the vkey was pressed after previous call to GetAsyncKeyState
-	return false;
-}
+bool keyDown(int vkey); // TRUE if windows virtual key was down
+void updateStats(int numSounds, float volume); // updates status on console title
 
 int main()
 {
@@ -55,14 +50,16 @@ int main()
 	printf("2 - Create Buddhist\n");
 	printf("3 - Create Forest\n");
 	printf("S - Stop all sounds\n");
+	printf("UP/DOWN - Inc/Dec volume\n");
 	printf("ESC - exit\n");
 	
 	std::vector<Sound*> activeSounds; // we'll use it to keep track of generated sounds
-	clock_t start = clock(); // use this to limit stream soundobject creation
+	clock_t start1 = clock(); // limit stream1 creation
+	clock_t start2 = clock(); // limit stream2 creation
 
 	while(true)
 	{
-		// there are two ways to stream
+		// there are three ways to stream
 		// #1 - Check individual sounds to stream
 		for(Sound* sound : activeSounds) // go through all active sounds
 		{
@@ -72,39 +69,58 @@ int main()
 
 		// #2 - Check the specific SoundStreams to stream all bound Sounds
 		stream1->Stream();
-
+		
+		// #3 - Use a ManagedSoundStream, which runs in a managed stream
 
 
 		// check for keypresses
-		if(keyPress('1')) // most minimalistic example
+		if(keyDown('1')) // most minimalistic example
 		{
 			activeSounds.push_back(new Sound(buffer1, false, true)); // sound:buffer1, loop:false, play:true
 		}
-		else if(keyPress('2') && (clock()-start) >= 1000)
+		else if(keyDown('2') && (clock()-start1) >= 1000)
 		{
 			// soundobjects can be initialized with a buffer and played later when needed
 			Sound* sound = new Sound(stream1); // sound:stream1
 			sound->Play(); // start playing the sound
 			activeSounds.push_back(sound);
-			start = clock();
+			start1 = clock();
 		}
-		else if(keyPress('3') && (clock()-start) >= 1000) 
+		else if(keyDown('3') && (clock()-start2) >= 1000) 
 		{
 			// soundobjects can be empty and forced to play a new soundbuffer/stream later
 			Sound* sound = new Sound(); // just an empty soundobject
 			sound->Play(stream2, false); // sound:stream2, loop:false
 			activeSounds.push_back(sound);
-			start = clock();
+			start2 = clock();
 		}
-		else if(keyPress('S')) // stop playing all sounds
+		else if(keyDown('S')) // stop playing all sounds
 		{
 			for(Sound* sound : activeSounds)
 				delete sound; // sound is auto-stopped
 			activeSounds.clear();
 		}
-		else if(keyPress(VK_ESCAPE))
-			break;
+		else if(keyDown(VK_UP))
+		{
+			// there are two ways to change sound volume
+			// #1 - Change the volume of a specific sound
+			//      This value has limited range: [0.0 - 1.0]
+			//for(Sound* sound : activeSounds)
+			//	sound->Volume(sound->Volume() + 0.1f);
 
+			// #2 - Change the gain of the global listener
+			//      This value has no limited range: [0.0 - Any], the software must enforce its own bounds on this
+			//      because the sound will easily start distorting beyond 2.0
+			Listener::Gain(Listener::Gain() + 0.1f);
+		}
+		else if(keyDown(VK_DOWN))
+		{
+			//for(Sound* sound : activeSounds)
+			//	sound->Volume(sound->Volume() - 0.1f);
+			Listener::Gain(Listener::Gain() - 0.1f);
+		}
+		else if(keyDown(VK_ESCAPE))
+			break;
 
 		// Check for any finished sounds:
 		for(unsigned i = 0; i < activeSounds.size(); )
@@ -118,12 +134,15 @@ int main()
 			++i;
 		}
 
+		updateStats(activeSounds.size(), Listener::Gain());
 
 		Sleep(50); // sleep a bit..
 	}
 
-	for(auto it = activeSounds.begin(); it != activeSounds.end(); ++it)
-		delete *it; // sound is automatically stopped upon deletion
+	for(Sound* sound : activeSounds)
+		delete sound; // sound is automatically stopped upon deletion
+	activeSounds.clear();
+
 	delete buffer1;
 	delete stream1;
 	delete stream2;
@@ -131,4 +150,24 @@ int main()
 	return 0;
 }
 
+bool keyDown(int vkey) // TRUE if windows virtual key was pressed
+{
+	if(GetAsyncKeyState(vkey) & 0x0001) // is the least significant bit set?
+		return true; // the vkey was pressed after previous call to GetAsyncKeyState
+	return false;
+}
 
+void updateStats(int numSounds, float volume)
+{
+	static int NumSounds = -1; // set these to invalid values at first
+	static float Volume = -1.0f;
+
+	if(NumSounds != numSounds || Volume != volume)
+	{
+		char buffer[80];
+		sprintf(buffer, "S3D - ActiveSounds: %d   Volume: %.1f", numSounds, volume);
+		SetConsoleTitleA(buffer);
+		NumSounds = numSounds;
+		Volume = volume;
+	}
+}

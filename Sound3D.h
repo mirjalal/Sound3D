@@ -639,14 +639,18 @@ class Listener
 public:
 
 	/**
-	 * Sets the master gain value of the listener object for Audio3D
-	 * @param gain Gain value to set for the listener. Range[0.0-2.0].
+	 * Sets the master gain value (Volume) of the listener object for Audio3D.
+	 * Valid range is [0.0 - Any], meaning the global volume can be increased
+	 * until the sound starts distorting. WARNING! This does not change system volume!
+	 * @param gain Gain value to set for the listener. Range[0.0 - Any].
 	 */
 	static void Gain(float gain);
 
 	/**
-	 * Gets the master gain value of the listener object for Audio3D
-	 * @return Master gain value. Range[0.0-2.0].
+	 * Gets the master gain value (Volume) of the listener object for Audio3D.
+	 * Valid range is [0.0 - Any], meaning the global volume can be increased
+	 * until the sound starts distorting. WARNING! This does not change system volume!
+	 * @return Master gain value (Volume). Range[0.0 - Any].
 	 */
 	static float Gain();
 

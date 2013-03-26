@@ -839,6 +839,8 @@ static void _InitializeAL()
 	 */
 	void SoundObject::Volume(float gain)
 	{
+		if(gain < 0.0f) gain = 0.0f;
+		else if(gain > 1.0f) gain = 1.0f;
 		alSourcef(alSource, AL_GAIN, gain);
 	}
 
@@ -1190,17 +1192,22 @@ static void _InitializeAL()
 
 
 	/**
-	 * Sets the master gain value of the listener object for Audio3D
-	 * @param gain Gain value to set for the listener. Range[0.0-2.0].
+	 * Sets the master gain value (Volume) of the listener object for Audio3D.
+	 * Valid range is [0.0 - Any], meaning the global volume can be increased
+	 * until the sound starts distorting. WARNING! This does not change system volume!
+	 * @param gain Gain value to set for the listener. Range[0.0 - Any].
 	 */
 	void Listener::Gain(float gain)
 	{
+		if(gain < 0.0f) gain = 0.0f;
 		alListenerf(AL_GAIN, gain);
 	}
 
 	/**
-	 * Gets the master gain value of the listener object for Audio3D
-	 * @return Master gain value. Range[0.0-2.0].
+	 * Gets the master gain value (Volume) of the listener object for Audio3D.
+	 * Valid range is [0.0 - Any], meaning the global volume can be increased
+	 * until the sound starts distorting. WARNING! This does not change system volume!
+	 * @return Master gain value (Volume). Range[0.0 - Any].
 	 */
 	float Listener::Gain()
 	{

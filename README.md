@@ -23,6 +23,7 @@ Planned features:
 
 Todo:
 	- Finish sound cone documentation
+	- Find mysterious OGG stream crash when too many SoundObjects stream from a single OggStream
 
 Dependencies: (just copy these to your executable directory)
 	- libmpg123.dll (required for MP3 loading, if not found, all MP3 loads will fail)

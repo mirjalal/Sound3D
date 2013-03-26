@@ -709,7 +709,9 @@ static void _InitVorbis()
 
 		int current_section;
 		int bytesTotal = 0; // total bytes read
-		do {
+		do 
+		{
+			// TODO: Find the mysterious Ogg stream error
 			int bytesRead = oggv_read(FileHandle, (char*)dstBuffer + bytesTotal, 
 				(count - bytesTotal), 0, 2, 1, &current_section);
 			if(bytesRead == 0) break; // EOF!
@@ -729,6 +731,8 @@ static void _InitVorbis()
 	{
 		if(!vfDll) return 0; // vorbis not present
 		if(int(streampos) >= StreamSize) streampos = 0; // out of bounds, set to beginning
+		
+		// TODO: Find the mysterious Ogg stream error
 		oggv_pcm_seek(FileHandle, streampos / SampleBlockSize); // seek PCM samples
 		return StreamPos = streampos; // finally, update the stream position
 	}
