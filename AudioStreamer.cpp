@@ -28,7 +28,7 @@
 
 #ifdef _DEBUG
 	#define indebug(x) x
-#elif
+#else
 	#define indebug(x) // do nothing in release
 #endif
 
@@ -53,46 +53,17 @@ namespace S3D {
 	static int GetExtension(const char* file) // returns the extension in the string as an integer
 	{
 		const char* ext = strrchr(file, '.');
-		if(!ext || ext == file)
+		if (!ext || ext == file)
 			return 0; // no extension || start of filename was '.'
 		return *(int*)ext; // force the extension bytes into an int
 	}
-
-	static bool FindRealPath(char out_fullpath[_MAX_PATH], const char* file)
-	{
-		char path[_MAX_PATH+4]; // we have to build a new string to contain a wildcard:
-		int len = strlen(file);
-		memcpy(path, file, len);
-		memcpy(path + len, ".*", 3);
-		// result: ../file.*
-
-		WIN32_FIND_DATA result;
-		HANDLE fh = FindFirstFileA(path, &result);
-		if(fh == INVALID_HANDLE_VALUE) // file not found!
-			return false;
-		FindClose(fh);
-
-		memcpy(out_fullpath, result.cFileName, len = strlen(result.cFileName));
-		out_fullpath[len] = '\0';
-		return true;
-	}
-
-	// helper function, tries to find a file and returns the extension as an int, -1 if file not found, 0 if no extension
-	static int FindFileExtension(const char* file)
-	{
-		char path[264];
-		if(!FindRealPath(path, file))
-			return -1; // file not found
-		return GetExtension(path);
-	}
+	
 
 	static AudioFileFormat GetAudioFileFormatByExtension(const char* file) // pretty cheap actually - we just check the file extension!
 	{
 		int ext = GetExtension(file);
-		if(!ext) ext = FindFileExtension(file);
-		if(ext <= 0)
-			return AudioFileFormat::INVALID; // no extension or no file found.
-		switch(ext) // interpret the extension as an int
+		if (!ext) return AudioFileFormat::INVALID; // no extension or no file found.
+		switch (ext) // interpret the extension as an int
 		{ // abuse little endian byte order:
 		case 'vaw.': return AudioFileFormat::WAV; // WAV file
 		case '3pm.': return AudioFileFormat::MP3; // MP3 file
@@ -117,7 +88,7 @@ namespace S3D {
 		};
 #pragma pack(pop)
 		MP3TAGV2 tag = *(MP3TAGV2*)buffer;
-		if(tag.id3[0] == 'I' && tag.id3[1] == 'D' && tag.id3[2] == '3')
+		if (tag.id3[0] == 'I' && tag.id3[1] == 'D' && tag.id3[2] == '3')
 			return true;
 		return false; // not an mp3 header
 	}
@@ -125,7 +96,7 @@ namespace S3D {
 	static AudioFileFormat GetAudioFileFormatByHeader(const char* file) // a bit heavier - we actually check the file header
 	{
 		FILE* f = fopen(file, "rb"); // open file 'read-binary'
-		if(f == NULL)
+		if (f == NULL)
 		{
 			indebug(printf("File not found: \"%s\"\n", file));
 			return AudioFileFormat::INVALID; // file doesn't exist
@@ -137,11 +108,11 @@ namespace S3D {
 		fread(buffer, sizeof(buffer), 1, f);
 		fclose(f); f = NULL;
 
-		if(buffer[0] == 'FFIR' && buffer[2] == 'EVAW')
+		if (buffer[0] == 'FFIR' && buffer[2] == 'EVAW')
 			return AudioFileFormat::WAV;
-		else if(buffer[0] == 'SggO')
+		else if (buffer[0] == 'SggO')
 			return AudioFileFormat::OGG;
-		else if(checkMP3Tag(buffer))
+		else if (checkMP3Tag(buffer))
 			return AudioFileFormat::MP3;
 		return AudioFileFormat::INVALID;
 	}
@@ -149,29 +120,29 @@ namespace S3D {
 	AudioStreamer* CreateAudioStreamer(const char* file)
 	{
 		AudioFileFormat fmt = GetAudioFileFormatByExtension(file);
-		if(!fmt) fmt = GetAudioFileFormatByHeader(file);
-		if(!fmt) return nullptr; // unsupported format
+		if (!fmt) fmt = GetAudioFileFormatByHeader(file);
+		if (!fmt) return nullptr; // unsupported format
 		switch(fmt) {
-		case AudioFileFormat::WAV: return new WAVStreamer();
-		case AudioFileFormat::MP3: return new MP3Streamer();
-		case AudioFileFormat::OGG: return new OGGStreamer();
+			case AudioFileFormat::WAV: return new WAVStreamer();
+			case AudioFileFormat::MP3: return new MP3Streamer();
+			case AudioFileFormat::OGG: return new OGGStreamer();
 		}
 		return nullptr; // ok?... unsupported format
 	}
 
 	bool CreateAudioStreamer(AudioStreamer* as, const char* file)
 	{
-		if(!as) return false; // oh well...
+		if (!as) return false; // oh well...
 		as->CloseStream(); // just in case...
 		
 		AudioFileFormat fmt = GetAudioFileFormatByExtension(file);
-		if(!fmt) fmt = GetAudioFileFormatByHeader(file);
-		if(!fmt) return false; // unsupported format
-		switch(fmt) {
-		case AudioFileFormat::WAV: new (as) WAVStreamer(); break;
-		case AudioFileFormat::MP3: new (as) MP3Streamer(); break;
-		case AudioFileFormat::OGG: new (as) OGGStreamer(); break;
-		default: return false; // unsupported format
+		if (!fmt) fmt = GetAudioFileFormatByHeader(file);
+		if (!fmt) return false; // unsupported format
+		switch (fmt) {
+			case AudioFileFormat::WAV: new (as) WAVStreamer(); break;
+			case AudioFileFormat::MP3: new (as) MP3Streamer(); break;
+			case AudioFileFormat::OGG: new (as) OGGStreamer(); break;
+			default: return false; // unsupported format
 		}
 		return true; // everything went ok
 	}
@@ -243,25 +214,21 @@ struct WAVHEADER
 	 */
 	bool AudioStreamer::OpenStream(const char* file)
 	{
-		if(FileHandle) return false; // dont allow reopen an existing stream
-		char path[_MAX_PATH]; // real path we will be using
-		if(!FindRealPath(path, file)) { // get the path, fail if it doesn't exist:
-			indebug(printf("File not found: \"%s\"\n", file));
+		if (FileHandle) // dont allow reopen an existing stream
 			return false;
-		}
 		
-		if(!(FileHandle = (int*)fopen(path, "rb"))) {
-			indebug(printf("Failed to open file: \"%s\"\n", path));
+		if (!(FileHandle = (int*)fopen(file, "rb"))) {
+			indebug(printf("Failed to open file: \"%s\"\n", file));
 			return false; // oh well;
 		}
 
 		WAVHEADER wav;
-		if(fread(&wav, sizeof(WAVHEADER), 1, (FILE*)FileHandle) != 1) {
-			indebug(printf("Failed to load WAV header: \"%s\"\n", path));
+		if (fread(&wav, sizeof(WAVHEADER), 1, (FILE*)FileHandle) != 1) {
+			indebug(printf("Failed to load WAV header: \"%s\"\n", file));
 			return false; // invalid file
 		}
-		if(wav.ChunkID != (int)'FFIR' || wav.Format != (int)'EVAW') { // != "RIFF" || != "WAVE"
-			indebug(printf("Invalid WAV file header: %s\n", path));
+		if (wav.ChunkID != (int)'FFIR' || wav.Format != (int)'EVAW') { // != "RIFF" || != "WAVE"
+			indebug(printf("Invalid WAV file header: %s\n", file));
 			return false; // invalid wav header
 		}
 
@@ -278,7 +245,7 @@ struct WAVHEADER
 	 */
 	void AudioStreamer::CloseStream()
 	{
-		if(FileHandle)
+		if (FileHandle)
 		{
 			fclose((FILE*)FileHandle);
 			FileHandle = 0;
@@ -299,12 +266,12 @@ struct WAVHEADER
 	 */
 	int AudioStreamer::ReadSome(void* dstBuffer, int dstSize)
 	{
-		if(!FileHandle)
+		if (!FileHandle)
 			return 0; // nothing to do here
 		int count = StreamSize - StreamPos; // calc available data from stream
-		if(count == 0) // if stream available bytes 0?
+		if (count == 0) // if stream available bytes 0?
 			return 0; // EOS reached
-		if(count > dstSize) // if stream has more data than buffer
+		if (count > dstSize) // if stream has more data than buffer
 			count = dstSize; // set bytes to read bigger
 		count -= count % SampleBlockSize; // make sure count is aligned to blockSize
 
@@ -321,7 +288,7 @@ struct WAVHEADER
 	 */
 	unsigned int AudioStreamer::Seek(unsigned int streampos)
 	{
-		if(int(streampos) >= StreamSize)
+		if (int(streampos) >= StreamSize)
 			streampos = 0;
 		streampos -= streampos % SampleBlockSize; // align to PCM blocksize
 		int actual = streampos + sizeof(WAVHEADER); // skip the WAVHEADER
@@ -375,8 +342,7 @@ static void _UninitMPG()
 static void _InitMPG()
 {
 	static const char* mpglib = "libmpg123";
-	mpgDll = LoadLibraryA(mpglib);
-	if(!mpgDll)
+	if (!(mpgDll = LoadLibraryA(mpglib)))
 	{
 		printf("Failed to load DLL %s!\n", mpglib);
 		return;
@@ -411,7 +377,7 @@ static void _InitMPG()
 	 */
 	MP3Streamer::MP3Streamer() : AudioStreamer()
 	{
-		if(!mpgDll) _InitMPG();
+		if (!mpgDll) _InitMPG();
 	}
 
 	/**
@@ -419,7 +385,7 @@ static void _InitMPG()
 	 */
 	MP3Streamer::MP3Streamer(const char* file) : AudioStreamer()
 	{
-		if(!mpgDll) _InitMPG();
+		if (!mpgDll) _InitMPG();
 		OpenStream(file);
 	}
 
@@ -438,24 +404,19 @@ static void _InitMPG()
 	 */
 	bool MP3Streamer::OpenStream(const char* file)
 	{
-		if(!mpgDll) return 0; // mpg123 not present
-		if(FileHandle) return false; // dont allow reopen an existing stream
-		char path[_MAX_PATH]; // real path we will be using
-		if(!FindRealPath(path, file)) { // get the path, fail if it doesn't exist:
-			indebug(printf("File not found: \"%s\"\n", file));
+		if (!mpgDll) return 0; // mpg123 not present
+		if (FileHandle)  // dont allow reopen an existing stream
 			return false;
-		}
-
 
 		FileHandle = mpg_new(nullptr, nullptr);
-		if(mpg_open(FileHandle, path)) {
-			indebug(printf("Failed to open file: \"%s\"\n", path));
+		if (mpg_open(FileHandle, file)) {
+			indebug(printf("Failed to open file: \"%s\"\n", file));
 			return false;
 		}
 
 		int rate, numChannels, encoding;
-		if(mpg_getformat(FileHandle, (long*)&rate, &numChannels, &encoding)) {
-			indebug(printf("Failed to read mp3 header format: \"%s\"\n", path));
+		if (mpg_getformat(FileHandle, (long*)&rate, &numChannels, &encoding)) {
+			indebug(printf("Failed to read mp3 header format: \"%s\"\n", file));
 			return false;
 		}
 		
@@ -473,8 +434,8 @@ static void _InitMPG()
 	 */
 	void MP3Streamer::CloseStream()
 	{
-		if(!mpgDll) return; // mpg123 not present
-		if(FileHandle)
+		if (!mpgDll) return; // mpg123 not present
+		if (FileHandle)
 		{
 			mpg_close(FileHandle);
 			mpg_delete(FileHandle);
@@ -496,13 +457,13 @@ static void _InitMPG()
 	 */
 	int MP3Streamer::ReadSome(void* dstBuffer, int dstSize)
 	{
-		if(!mpgDll) return 0; // mpg123 not present
-		if(!FileHandle)
+		if (!mpgDll) return 0; // mpg123 not present
+		if (!FileHandle)
 			return 0; // nothing to do here
 		int count = StreamSize - StreamPos; // calc available data from stream
-		if(count == 0) // if stream available bytes 0?
+		if (count == 0) // if stream available bytes 0?
 			return 0; // EOS reached
-		if(count > dstSize) // if stream has more data than buffer
+		if (count > dstSize) // if stream has more data than buffer
 			count = dstSize; // set bytes to read bigger
 		count -= count % SampleBlockSize; // make sure count is aligned to blockSize
 
@@ -520,8 +481,8 @@ static void _InitMPG()
 	 */
 	unsigned int MP3Streamer::Seek(unsigned int streampos)
 	{
-		if(!mpgDll) return 0;
-		if(int(streampos) >= StreamSize)
+		if (!mpgDll) return 0;
+		if (int(streampos) >= StreamSize)
 			streampos = 0;
 		int actual = streampos / SampleBlockSize; // mpg_seek works by sample blocks, so lets select the sample
 		mpg_seek(FileHandle, actual, SEEK_SET);
@@ -573,8 +534,7 @@ static void _UninitVorbis()
 static void _InitVorbis()
 {
 	static const char* vorbislib = "vorbisfile";
-	vfDll = LoadLibraryA(vorbislib); // ogg.dll and vorbis.dll is loaded by vorbislib.dll
-	if(!vfDll)
+	if (!(vfDll = LoadLibraryA(vorbislib))) // ogg.dll and vorbis.dll is loaded by vorbisfile.dll
 	{
 		printf("Failed to load DLL %s!\n", vorbislib);
 		return;
@@ -627,16 +587,12 @@ static void _InitVorbis()
 	bool OGGStreamer::OpenStream(const char* file)
 	{
 		if(!vfDll) return false; // vorbis not present
-		if(FileHandle) return false; // dont allow reopen an existing stream
-		char path[_MAX_PATH]; // real path we will be using
-		if(!FindRealPath(path, file)) { // get the path, fail if it doesn't exist:
-			indebug(printf("File not found: \"%s\"\n", file));
+		if(FileHandle) // dont allow reopen an existing stream
 			return false;
-		}
 
-		FILE* f = fopen(path, "rb");
+		FILE* f = fopen(file, "rb");
 		if(!f) {
-			indebug(printf("Failed to open file: \"%s\"\n", path));
+			indebug(printf("Failed to open file: \"%s\"\n", file));
 			return false;
 		}
 		ov_callbacks cb = { oggv_read_func, oggv_seek_func, oggv_close_func, oggv_tell_func };
@@ -714,9 +670,14 @@ static void _InitVorbis()
 			// TODO: Find the mysterious Ogg stream error
 			int bytesRead = oggv_read(FileHandle, (char*)dstBuffer + bytesTotal, 
 				(count - bytesTotal), 0, 2, 1, &current_section);
-			if(bytesRead == 0) break; // EOF!
+
+			if (bytesRead == 0) 
+				break; // EOF!
+
 			bytesTotal += bytesRead;
-		} while(bytesTotal < count);
+		}
+		while (bytesTotal < count);
+
 		StreamPos += bytesTotal;
 		return bytesTotal;
 	}
@@ -729,8 +690,8 @@ static void _InitVorbis()
 	 */
 	unsigned int OGGStreamer::Seek(unsigned int streampos)
 	{
-		if(!vfDll) return 0; // vorbis not present
-		if(int(streampos) >= StreamSize) streampos = 0; // out of bounds, set to beginning
+		if (!vfDll) return 0; // vorbis not present
+		if (int(streampos) >= StreamSize) streampos = 0; // out of bounds, set to beginning
 		
 		// TODO: Find the mysterious Ogg stream error
 		oggv_pcm_seek(FileHandle, streampos / SampleBlockSize); // seek PCM samples

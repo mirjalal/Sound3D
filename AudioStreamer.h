@@ -32,9 +32,9 @@ namespace S3D {
 class AudioStreamer
 {
 protected:
-	int* FileHandle;		// internally interpreted file handle
-	int StreamSize;			// size of the audiostream in PCM bytes, not File bytes
-	int StreamPos;			// current stream position in PCM bytes
+	int* FileHandle;				// internally interpreted file handle
+	int StreamSize;					// size of the audiostream in PCM bytes, not File bytes
+	int StreamPos;					// current stream position in PCM bytes
 	unsigned short SampleRate;		// frequency (or rate) of the sound data, usually 20500 or 41000 (20.5kHz / 41kHz)
 	unsigned char NumChannels;		// number of channels in a sample block, usually 1 or 2 (Mono / Stereo)
 	unsigned char SampleBlockSize;	// size (in bytes) of a sample, usually 1 to 4 bytes (Mono8:1 / Stereo8:2 / Mono16:2 / Stereo16:4)

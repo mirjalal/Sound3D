@@ -31,7 +31,7 @@
 
 #ifdef _DEBUG
 #define indebug(x) x
-#elif
+#else
 #define indebug(x) // ...
 #endif
 

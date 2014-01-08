@@ -40,7 +40,7 @@ int main()
 	buffer1->Load("explosion_01.ogg"); // the entire ogg file is loaded
 
 	SoundStream* stream1 = new SoundStream(); // this is a soundstream, the audio is obviously streamed and not loaded whole
-	stream1->Load("buddhist_01"); // buddhist_01.ogg, OGG format is auto-detected
+	stream1->Load("buddhist_01.ogg"); // buddhist_01.ogg
 
 	ManagedSoundStream* stream2 = new ManagedSoundStream(); // managed soundstreams are auto-streamed in a separate thread
 	stream2->Load("ambient_forest.ogg");
@@ -57,13 +57,13 @@ int main()
 	clock_t start1 = clock(); // limit stream1 creation
 	clock_t start2 = clock(); // limit stream2 creation
 
-	while(true)
+	while (true)
 	{
 		// there are three ways to stream
 		// #1 - Check individual sounds to stream
-		for(Sound* sound : activeSounds) // go through all active sounds
+		for (Sound* sound : activeSounds) // go through all active sounds
 		{
-			if(sound->IsStreamable()) // if the sound is streamable
+			if (sound->IsStreamable()) // if the sound is streamable
 				sound->Stream(); // Data is only streamed if the previous soundbuffer in the queue was processed, so this method can be called many times.
 		}
 
@@ -74,11 +74,11 @@ int main()
 
 
 		// check for keypresses
-		if(keyDown('1')) // most minimalistic example
+		if (keyDown('1')) // most minimalistic example
 		{
 			activeSounds.push_back(new Sound(buffer1, false, true)); // sound:buffer1, loop:false, play:true
 		}
-		else if(keyDown('2') && (clock()-start1) >= 1000)
+		else if (keyDown('2') && (clock()-start1) >= 1000)
 		{
 			// soundobjects can be initialized with a buffer and played later when needed
 			Sound* sound = new Sound(stream1); // sound:stream1
@@ -86,7 +86,7 @@ int main()
 			activeSounds.push_back(sound);
 			start1 = clock();
 		}
-		else if(keyDown('3') && (clock()-start2) >= 1000) 
+		else if (keyDown('3') && (clock()-start2) >= 1000) 
 		{
 			// soundobjects can be empty and forced to play a new soundbuffer/stream later
 			Sound* sound = new Sound(); // just an empty soundobject
@@ -94,13 +94,13 @@ int main()
 			activeSounds.push_back(sound);
 			start2 = clock();
 		}
-		else if(keyDown('S')) // stop playing all sounds
+		else if( keyDown('S')) // stop playing all sounds
 		{
 			for(Sound* sound : activeSounds)
 				delete sound; // sound is auto-stopped
 			activeSounds.clear();
 		}
-		else if(keyDown(VK_UP))
+		else if (keyDown(VK_UP))
 		{
 			// there are two ways to change sound volume
 			// #1 - Change the volume of a specific sound
@@ -113,17 +113,17 @@ int main()
 			//      because the sound will easily start distorting beyond 2.0
 			Listener::Gain(Listener::Gain() + 0.1f);
 		}
-		else if(keyDown(VK_DOWN))
+		else if (keyDown(VK_DOWN))
 		{
 			//for(Sound* sound : activeSounds)
 			//	sound->Volume(sound->Volume() - 0.1f);
 			Listener::Gain(Listener::Gain() - 0.1f);
 		}
-		else if(keyDown(VK_ESCAPE))
+		else if (keyDown(VK_ESCAPE))
 			break;
 
 		// Check for any finished sounds:
-		for(unsigned i = 0; i < activeSounds.size(); )
+		for (size_t i = 0; i < activeSounds.size(); )
 		{
 			if(activeSounds[i]->IsPlaying() == false) // it stopped playing?
 			{
@@ -139,7 +139,7 @@ int main()
 		Sleep(50); // sleep a bit..
 	}
 
-	for(Sound* sound : activeSounds)
+	for (Sound* sound : activeSounds)
 		delete sound; // sound is automatically stopped upon deletion
 	activeSounds.clear();
 
@@ -152,7 +152,7 @@ int main()
 
 bool keyDown(int vkey) // TRUE if windows virtual key was pressed
 {
-	if(GetAsyncKeyState(vkey) & 0x0001) // is the least significant bit set?
+	if (GetAsyncKeyState(vkey) & 0x0001) // is the least significant bit set?
 		return true; // the vkey was pressed after previous call to GetAsyncKeyState
 	return false;
 }
@@ -162,7 +162,7 @@ void updateStats(int numSounds, float volume)
 	static int NumSounds = -1; // set these to invalid values at first
 	static float Volume = -1.0f;
 
-	if(NumSounds != numSounds || Volume != volume)
+	if (NumSounds != numSounds || Volume != volume)
 	{
 		char buffer[80];
 		sprintf(buffer, "S3D - ActiveSounds: %d   Volume: %.1f", numSounds, volume);
