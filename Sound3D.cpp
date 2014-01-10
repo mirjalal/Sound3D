@@ -18,16 +18,12 @@
  * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE 
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-
 #include "Sound3D.h"
 #include <stdio.h>
 #include <string.h>
-
-#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
-#include "OpenAL\al.h"
-#include "OpenAL\alc.h"
+#pragma comment(lib, "XAudio2_7/X3DAudio.lib")
 
 #ifdef _DEBUG
 #define indebug(x) x
@@ -35,128 +31,225 @@
 #define indebug(x) // ...
 #endif
 
-namespace S3D {
-
-static ALCdevice* pDevice = NULL;
-static ALCcontext* pContext = NULL;
-static void _UninitAL()
+namespace S3D 
 {
-	alcMakeContextCurrent(NULL); // remove current context
-	alcDestroyContext(pContext); // destroy context
-	alcCloseDevice(pDevice); // close device
-}
-static void _InitializeAL()
-{
-	pDevice = alcOpenDevice(NULL);
-	pContext = alcCreateContext(pDevice, NULL);
-	alcMakeContextCurrent(pContext); // set current active context
-	_Atexit(_UninitAL);
-}
 
-	/**
-	 * @return OpenAL specific format specifier based on numChannels and sampleSize
-	 */
-	static int GetALFormat(int numChannels, int sampleSize)
+	static IXAudio2* xEngine;					// the core engine for XAudio2
+	static IXAudio2MasteringVoice* xMaster;		// the Mastering voice is the global LISTENER / mixer
+	static X3DAUDIO_HANDLE x3DAudioHandle;		// X3DSound
+	static X3DAUDIO_LISTENER xListener;			// global listener position for X3DSound
+
+
+	static void UninitXAudio2()
 	{
-		return numChannels == 1 ? 
-			(sampleSize == 1 ? AL_FORMAT_MONO8 : AL_FORMAT_MONO16) : 
-			(sampleSize == 1 ? AL_FORMAT_STEREO8 : AL_FORMAT_STEREO16);
+		xMaster->DestroyVoice();
+		xEngine->Release();
+	}
+	static void InitXAudio2()
+	{
+		CoInitializeEx(NULL, COINIT_MULTITHREADED);
+		XAudio2Create(&xEngine);
+		xEngine->CreateMasteringVoice(&xMaster);
+		X3DAudioInitialize(SPEAKER_STEREO, 340.29f, x3DAudioHandle);
+
+		atexit(UninitXAudio2);
 	}
 
+
 	/**
-	 * @param size Size of the OpenAL buffer to create and fill with audio data
+	 * @param ctx SoundBuffer passed to the buffer as its Context
+	 * @param size Size of the buffer to create and fill with audio data
 	 * @param strm AudioStream to stream from
 	 * @param pos [optional] Position of the stream to stream from. Returns the new position of the stream. (in BYTES)
-	 * @return OpenAL buffer that was created and filled
+	 * @return NEW buffer if successful. NULL if EndOfStream or OutOfMemory.
 	 */
-	static int CreateALBuffer(int size, AudioStreamer* strm, int* pos = nullptr)
+	static XABuffer* CreateXABuffer(SoundBuffer* ctx, int size, AudioStreamer* strm, int* pos = nullptr)
 	{
-		//if(pos && strm->Position() != *pos)
-		if(pos)	strm->Seek(*pos); // seek to specified pos, let the AudioStream handle error conditions
-		unsigned alBuffer = 0;
-		alGenBuffers(1, &alBuffer);
+		if (pos) strm->Seek(*pos); // seek to specified pos, let the AudioStream handle error conditions
+		if (strm->IsEOS()) return nullptr; // EOS(), failed!
 
-		char* data = (char*)_malloca(size);
-		int bytesRead = strm->ReadSome(data, size);
-		if(pos) *pos += bytesRead; // update position
-		alBufferData(alBuffer, GetALFormat(strm->Channels(), strm->SampleSize()), data, bytesRead, strm->Frequency());
-		_freea(data);
-		return alBuffer;
+		// min(size, available);
+		int bytesToRead = strm->Available();
+		if (size < bytesToRead) bytesToRead = size;
+
+		XABuffer* buffer = (XABuffer*)malloc(sizeof(XABuffer)+bytesToRead);
+		if (!buffer) return nullptr; // out of memory :S
+		BYTE* data = (BYTE*)buffer + sizeof(XABuffer); // sound data follows after the XABuffer header
+
+		int bytesRead = strm->ReadSome(data, bytesToRead);
+		if (pos) *pos += bytesRead; // update position
+
+		buffer->Flags = strm->IsEOS() ? XAUDIO2_END_OF_STREAM : 0; // end of stream?
+		buffer->AudioBytes = bytesRead;
+		buffer->pAudioData = data;
+		buffer->PlayBegin = 0;		// first sample to play
+		buffer->PlayLength = 0;		// number of samples to play
+		buffer->LoopBegin = 0;		// first sample to loop
+		buffer->LoopLength = 0;		// number of samples to loop
+		buffer->LoopCount = 0;		// how many times to loop the region
+		buffer->pContext = ctx;		// context of the buffer
+		indebug(ctx->RefCount()); // access the buffer Context in debug mode, to hopefully catch invalid ctx's
+		int sampleSize = strm->SampleSize();
+		buffer->nBytesPerSample = sampleSize;
+
+		WAVEFORMATEX& wf = buffer->wf;
+		wf.wFormatTag = WAVE_FORMAT_PCM;
+		wf.nChannels = strm->Channels();
+		buffer->nPCMSamples = bytesRead / (sampleSize * wf.nChannels);
+		wf.nSamplesPerSec = strm->Frequency();
+		wf.wBitsPerSample = sampleSize * 8;
+		wf.nBlockAlign = wf.nChannels * sampleSize;
+		wf.nAvgBytesPerSec = wf.nBlockAlign * wf.nSamplesPerSec;
+		wf.cbSize = sizeof(WAVEFORMATEX);
+		
+		// this is enough to create an somewhat unique pseudo-hash:
+		buffer->wfHash = wf.nSamplesPerSec + (wf.nChannels * 25) + (wf.wBitsPerSample * 7);
+		return buffer;
 	}
 
 	/**
-	 * @param alBuffer OpenAL buffer to fill with audio data
-	 * @param strm AudioStream to stream from
+	 * Streams next chunk from the Stream set in XABuffer
+	 * @param buffer Buffer to fill with audio data
 	 * @param pos [optional] Position of the stream to stream from (in BYTES)
 	 */
-	static void FillALBuffer(unsigned alBuffer, AudioStreamer* strm, int* pos = nullptr)
+	static void StreamXABuffer(XABuffer* buffer, AudioStreamer* strm, int* pos = nullptr)
 	{
-		//if(pos && strm->Position() != *pos)
-		if(pos)	strm->Seek(*pos); // seek to specified pos, let the AudioStream handle error conditions
-		int size;
-		alGetBufferi(alBuffer, AL_SIZE, &size);
-		char* data = (char*)_malloca(size);
-		int bytesRead = strm->ReadSome(data, size);
-		if(pos) *pos += bytesRead; // update position
-		alBufferData(alBuffer, GetALFormat(strm->Channels(), strm->SampleSize()), data, bytesRead, strm->Frequency());
-		_freea(data);
-	}
+		if (pos) strm->Seek(*pos); // seek to specified pos, let the AudioStream handle error conditions
+		
+		buffer->AudioBytes = strm->ReadSome((void*)buffer->pAudioData, buffer->AudioBytes);
+		if (strm->IsEOS()) // end of stream was reached
+			buffer->Flags = XAUDIO2_END_OF_STREAM;
 
-
-
-
-
-
-
-
-	SoundBuffer::SoundBuffer() // creates a new SoundBuffer object
-		: alBuffer(0), refCount(0)
-	{
-		if(!pDevice) _InitializeAL();
-	}
-	SoundBuffer::SoundBuffer(const char* file) : alBuffer(0), refCount(0)
-	{
-		if(!pDevice) _InitializeAL();
-		Load(file);
-	}
-	SoundBuffer::~SoundBuffer() // destroys and unloads this buffer
-	{
-		if(alBuffer) {
-			Unload();
-		}
-	}
-	int SoundBuffer::Frequency() const		// @return Frequency in Hz of this SoundBuffer data
-	{
-		int value; alGetBufferi(alBuffer, AL_FREQUENCY, &value);
-		return value;
-	}
-	int SoundBuffer::SampleBits() const		// @return Bitrate of this SoundBuffer data
-	{
-		int value; alGetBufferi(alBuffer, AL_BITS, &value);
-		return value;
-	}
-	int SoundBuffer::SampleBytes() const	// @return Number of bytes in a sample of this SoundBuffer data (1 or 2)
-	{
-		return SampleBits() >> 3; // div by 8
-	}
-	int SoundBuffer::Channels() const		// @return Number of sound channels in the SoundBuffer data (1 or 2)
-	{
-		int value; alGetBufferi(alBuffer, AL_CHANNELS, &value);
-		return value;
-	}
-	int SoundBuffer::SampleSize() const		// @return Size of a sample block in bytes [LL][RR] (2 or 4)
-	{
-		return SampleBytes() * Channels();
+		if (pos) *pos += buffer->AudioBytes; // update position
 	}
 
 	/**
-	 * @note For a SoundStream object, this returns the entire stream size in bytes!
+	 * @param buffer Reference to an Audio buffer to destroy. Buffer will be NULL after this call.
+	 */
+	static void DestroyXABuffer(XABuffer*& buffer)
+	{
+		free((void*)buffer);
+		buffer = nullptr;
+	}
+
+
+
+
+
+
+	/**
+	 * Creates a new SoundBuffer object
+	 */
+	SoundBuffer::SoundBuffer() : refCount(0), xaBuffer(nullptr)
+	{
+		if (!xEngine) InitXAudio2();
+	}
+
+	/**
+	 * Creates a new SoundBuffer and loads the specified sound file
+	 * @param file Path to sound file to load
+	 */
+	SoundBuffer::SoundBuffer(const char* file) : refCount(0), xaBuffer(nullptr)
+	{
+		if (!xEngine) InitXAudio2();
+		Load(file);
+	}
+
+	/**
+	 * Destroyes and unloads this buffer
+	 */
+	SoundBuffer::~SoundBuffer()
+	{
+		if (xaBuffer)
+			Unload();
+	}
+
+	/**
+	 * @return Frequency in Hz of this SoundBuffer data
+	 */
+	int SoundBuffer::Frequency() const
+	{
+		return xaBuffer->wf.nSamplesPerSec;
+	}
+
+	/**
+	 * @return Number of bits in a sample of this SoundBuffer data (8 or 16)
+	 */
+	int SoundBuffer::SampleBits() const
+	{
+		return xaBuffer->wf.wBitsPerSample;
+	}
+
+	/**
+	 * @return Number of bytes in a sample of this SoundBuffer data (1 or 2)
+	 */
+	int SoundBuffer::SampleBytes() const
+	{
+		return xaBuffer->nBytesPerSample;
+	}
+
+	/**
+	 * @return Number of sound channels in the SoundBuffer data (1 or 2)
+	 */
+	int SoundBuffer::Channels() const
+	{
+		return xaBuffer->wf.nChannels;
+	}
+
+	/** 
+	 * @return Size of a sample block in bytes [LL][RR] (1 to 4)
+	 */
+	int SoundBuffer::SampleSize() const 
+	{
+		return xaBuffer->nBytesPerSample * xaBuffer->wf.nChannels;
+	}
+
+	/**
+	 * @return Size of this SoundBuffer or SoundStream in BYTES
+	 */
+	int SoundBuffer::SizeBytes() const
+	{
+		return xaBuffer->AudioBytes;
+	}
+
+	/**
 	 * @return Size of this SoundBuffer in PCM SAMPLES
 	 */
 	int SoundBuffer::Size() const
 	{
-		int value; alGetBufferi(alBuffer, AL_SIZE, &value);
-		return value / (SampleBytes() * Channels());
+		return xaBuffer->nPCMSamples;
+	}
+
+	/**
+	 * @return Number of SoundObjects that still reference this SoundBuffer.
+	 */
+	int SoundBuffer::RefCount() const 
+	{
+		return refCount; 
+	}
+
+	/**
+	 * @return TRUE if this object is a Sound stream
+	 */
+	bool SoundBuffer::IsStream() const 
+	{ 
+		return false; 
+	}
+
+	/**
+	 * @return Wave format descriptor for this buffer
+	 */
+	const WAVEFORMATEX* SoundBuffer::WaveFormat() const
+	{
+		return xaBuffer ? &xaBuffer->wf : nullptr;
+	}
+
+	/**
+	 * @return Unique hash to distinguish between different Wave formats
+	 */
+	unsigned SoundBuffer::WaveFormatHash() const
+	{
+		return xaBuffer ? xaBuffer->wfHash : 0;
 	}
 
 	/**
@@ -167,20 +260,20 @@ static void _InitializeAL()
 	 */
 	bool SoundBuffer::Load(const char* file)
 	{
-		if(alBuffer) // is there existing data?
+		if (xaBuffer) // is there existing data?
 			return false;
 		
-		AudioStreamer mem;
+		AudioStreamer mem; // temporary stream
 		AudioStreamer* strm = &mem;
-		if(!CreateAudioStreamer(strm, file))
+		if (!CreateAudioStreamer(strm, file))
 			return false; // invalid file format or file not found
 
-		if(!strm->OpenStream(file))
+		if (!strm->OpenStream(file))
 			return false; // failed to open the stream (probably not really correct format)
 
-		alBuffer = CreateALBuffer(strm->Size(), strm);
+		xaBuffer = CreateXABuffer(this, strm->Size(), strm);
 		strm->CloseStream(); // close this manually, otherwise we get a nasty error when the dtor runs...
-		return true;
+		return xaBuffer != nullptr;
 	}
 
 	/**
@@ -190,34 +283,30 @@ static void _InitializeAL()
 	 */
 	bool SoundBuffer::Unload()
 	{
-		if(!alBuffer)
+		if (!xaBuffer)
 			return true; // yes, its unloaded
-		if(refCount > 0) {
+		if (refCount > 0) {
 			indebug(printf("SoundBuffer::Unload() Memory Leak: failed to delete alBuffer, because it's still in use.\n"));
 			return false; // can't do anything here while still referenced
 		}
-		alBufferData(alBuffer, AL_FORMAT_MONO8, NULL, 0, 0); // remove buffer data
-		alDeleteBuffers(1, &alBuffer);
-		alBuffer = 0;
+		DestroyXABuffer(xaBuffer);
 		return true;
 	}
 
 	/**
 	 * Binds a specific source to this SoundBuffer and increases the refCount.
 	 * @param so SoundObject to bind to this SoundBuffer.
-	 * @return FALSE is the binding failed. TODO: POSSIBLE REASONS?
+	 * @return FALSE if the binding failed. TODO: POSSIBLE REASONS?
 	 */
 	bool SoundBuffer::BindSource(SoundObject* so)
 	{
-		if(!alBuffer) 
+		if (!xaBuffer) 
 			return false; // no data
 
-		int value;
-		alGetSourcei(so->alSource, AL_BUFFER, &value);
-		if(value == alBuffer) // same buffer? no double-binding dude, it will mess up refCounting.
-			return false;
+		if (so->Sound == this)
+			return false; // no double-binding dude, it will mess up refCounting.
 
-		alSourcei(so->alSource, AL_BUFFER, alBuffer);
+		so->Source->SubmitSourceBuffer(xaBuffer); // enqueue this buffer
 		++refCount;
 		return true;
 	}
@@ -229,17 +318,30 @@ static void _InitializeAL()
 	 */
 	bool SoundBuffer::UnbindSource(SoundObject* so)
 	{
-		int value;
-		alGetSourcei(so->alSource, AL_BUFFER, &value); // correct alSource <-> alBuffer link?
-		if(value == alBuffer) {
-			so->Stop(); // stop the sound before unloading
-			alSourcei(so->alSource, AL_BUFFER, NULL); // detach the buffer
+		if (so->Sound == this) // correct buffer link?
+		{
+			so->Source->Stop(); // make sure its stopped (otherwise Flush won't work)
+			so->Source->FlushSourceBuffers(); // ensure not in queue anymore
 			--refCount;
-			return true;
 		}
 		return false;
 	}
 
+	/**
+	 * Resets the buffer in the context of the specified SoundObject
+	 * @note Calls ResetStream on AudioStreams.
+	 * @param so SoundObject to reset this buffer for
+	 * @return TRUE if reset was successful
+	 */
+	bool SoundBuffer::ResetBuffer(SoundObject* so)
+	{
+		if (!xaBuffer || !so->Source)
+			return false; // nothing to do here
+		so->Source->Stop();
+		so->Source->FlushSourceBuffers();
+		so->Source->SubmitSourceBuffer(xaBuffer);
+		return true;
+	}
 
 
 
@@ -249,28 +351,45 @@ static void _InitializeAL()
 
 
 
-
-
-	SoundStream::SoundStream() // creates a new SoundStream object
+	/**
+	 * Creates a new SoundsStream object
+	 */
+	SoundStream::SoundStream()
 	{
 	}
+
+	/**
+	 * Creates a new SoundStream object and loads the specified sound file
+	 * @param file Path to the sound file to load
+	 */
 	SoundStream::SoundStream(const char* file)
 	{
 		Load(file);
 	}
-	SoundStream::~SoundStream() // destroys and unloads this SoundStream
+
+	/**
+	 * Destroys and unloads any resources held
+	 */
+	SoundStream::~SoundStream()
 	{
-		if(alBuffer) // active buffer?
+		if (xaBuffer) // active buffer?
 			Unload();
 	}
 
 	/**
-	 * @note For a SoundStream object, this returns the entire stream size in bytes!
 	 * @return Size of this SoundStream in PCM SAMPLES
 	 */
 	int SoundStream::Size() const
 	{
-		return alStream ? (alStream->Size() / (SampleBytes() * Channels())) : 0;
+		return alStream ? (alStream->Size() / SampleSize()) : 0;
+	}
+
+	/**
+	 * @return TRUE if this object is a Sound stream
+	 */
+	bool SoundStream::IsStream() const
+	{
+		return true;
 	}
 
 	/**
@@ -281,18 +400,18 @@ static void _InitializeAL()
 	 */
 	bool SoundStream::Load(const char* file)
 	{
-		if(alBuffer) // is there existing data?
+		if (xaBuffer) // is there existing data?
 			return false;
 
-		if(!(alStream = CreateAudioStreamer(file)))
+		if (!(alStream = CreateAudioStreamer(file)))
 			return false; // :(
 		
-		if(!alStream->OpenStream(file))
+		if (!alStream->OpenStream(file))
 			return false;
 
-		int pos = 0;
-		alBuffer = CreateALBuffer(STREAM_BUFFERSIZE, alStream, &pos);
-		return true;
+		// load the first buffer in the stream:
+		xaBuffer = CreateXABuffer(this, STREAM_BUFFERSIZE, alStream, 0);
+		return xaBuffer != nullptr;
 	}
 
 	/**
@@ -302,15 +421,14 @@ static void _InitializeAL()
 	 */
 	bool SoundStream::Unload()
 	{
-		if(!alBuffer)
+		if (!xaBuffer)
 			return true; // yes, its unloaded
-		if(refCount > 0) {
-			indebug(printf("SoundStream::Unload() Memory Leak: failed to delete alBuffer, because it's still in use.\n"));
+		if (refCount > 0) {
+			indebug(printf("SoundStream::Unload() Memory Leak: failed to delete xaBuffer, because it's still in use.\n"));
 			return false; // can't do anything here while still referenced
 		}
-		alDeleteBuffers(1, (ALuint*)&alBuffer);
-		alBuffer = 0;
-		if(alStream) { delete alStream; alStream = 0; }
+		DestroyXABuffer(xaBuffer);
+		if (alStream) { delete alStream; alStream = NULL; }
 		return true;
 	}
 
@@ -321,10 +439,10 @@ static void _InitializeAL()
 	 */
 	bool SoundStream::BindSource(SoundObject* so)
 	{
-		if(!alBuffer) 
+		if (!xaBuffer) 
 			return false; // no data loaded yet
 
-		alSources.push_back(SO_ENTRY(so, 0, 0)); // default streamPos
+		alSources.emplace_back(so, 0, 0); // default streamPos
 		LoadStreamData(so, 0); // load initial stream data (2 buffers)
 
 		++refCount;
@@ -338,49 +456,54 @@ static void _InitializeAL()
 	 */
 	bool SoundStream::UnbindSource(SoundObject* so)
 	{
-		if(!alBuffer)
+		if (!xaBuffer)
 			return false; // no data loaded yet
 		
-		int index = GetIndexOf(so);
-		if(index == -1) return false; // source doesn't exist
+		SO_ENTRY* e = GetSOEntry(so);
+		if (!e) return false; // source doesn't exist
 
-		so->Stop(); // stop the sound before unloading
 		ClearStreamData(so); // unload all buffers
 
-		alSources.erase(alSources.begin() + index);
+		alSources.erase(alSources.begin() + (e - alSources.data()));
 		--refCount;
 		return true;
 	}
 
 	/**
-	 * Streams more sound data from the AudioStream if needed.
-	 * This method can be called several times with no impact - the buffers
-	 * are only filled ON-DEMAND. This method is simply the trigger mechanism.
-	 * All the bound SoundObjects are streamed and updated.
-	 * @return Number of buffers streamed and filled.
+	 * Resets the buffer in the context of the specified SoundObject
+	 * @note Calls ResetStream on AudioStreams.
+	 * @param so SoundObject to reset this buffer for
+	 * @return TRUE if reset was successful
 	 */
-	int SoundStream::Stream()
+	bool SoundStream::ResetBuffer(SoundObject* so)
 	{
-		if(!alBuffer) return 0; // nothing to do here
-		int numStreamed = 0;
-		for(auto it = alSources.begin(); it != alSources.end(); ++it)
-			numStreamed += Stream(*it);
-		return numStreamed;
+		return ResetStream(so);
 	}
 
 	/**
-	 * Streams more sound data from the AudioStream if needed.
-	 * This method can be called several times with no impact - the buffers
-	 * are only filled ON-DEMAND. This method is simply the trigger mechanism.
+	 * Streams the next Buffer block from the stream.
 	 * @param so Specific SoundObject to stream with.
-	 * @return Number of buffers streamed and filled.
+	 * @return TRUE if a buffer was streamed. FALSE if EOS()
 	 */
-	int SoundStream::Stream(SoundObject* so)
+	bool SoundStream::StreamNext(SoundObject* so)
 	{
-		if(!alBuffer) return 0; // nothing to do here
-		int index = GetIndexOf(so);
-		if(index == -1) return 0;
-		return Stream(alSources[index]);
+		if (!xaBuffer) 
+			return false; // nothing to do here
+		if (SO_ENTRY* e = GetSOEntry(so))
+			return StreamNext(*e);
+		return false; // nothing to stream
+	}
+
+	/**
+	 * Resets the stream by unloading previous buffers and requeuing the first two buffers.
+	 * @param so SoundObject to reset the stream for
+	 * @return TRUE if stream was successfully reloaded
+	 */
+	bool SoundStream::ResetStream(SoundObject* so)
+	{
+		// simply clear and load again, to avoid code maintenance hell
+		ClearStreamData(so);
+		return LoadStreamData(so, 0);
 	}
 
 	/**
@@ -389,32 +512,20 @@ static void _InitializeAL()
 	 */
 	bool SoundStream::IsEOS(const SoundObject* so) const
 	{
-		int i = GetIndexOf(so);
-		return i == -1 ? true : (alStream ? (alSources[i].next >= (unsigned)alStream->Size()) : true);
+		SO_ENTRY* e = GetSOEntry(so);
+		return e ? true : (alStream ? (e->next >= alStream->Size()) : true);
 	}
 
 	/**
 	 * @param so SoundObject to query index of
-	 * @return A valid index [0...n] if this SoundObject is bound. [-1] if it's not bound.
+	 * @return A valid pointer if this SoundObject is bound. Otherwise NULL.
 	 */
-	int SoundStream::GetIndexOf(const SoundObject* so) const
+	SoundStream::SO_ENTRY* SoundStream::GetSOEntry(const SoundObject* so) const
 	{
-		for(unsigned i = 0; i < alSources.size(); ++i)
-			if(alSources[i].obj == so)
-				return i;
-		return -1;
-	}
-
-	/**
-	 * Resets the stream by unloading previous buffers and requeuing the first two buffers.
-	 * @param so SoundObject to reset the stream for
-	 */
-	void SoundStream::ResetStream(SoundObject* so)
-	{
-		so->Stop();
-		// simply clear and load again, to avoid code maintenance hell
-		ClearStreamData(so);
-		LoadStreamData(so, 0);
+		for (const SO_ENTRY& e : alSources)
+			if (e.obj == so)
+				return (SO_ENTRY*)&e;
+		return nullptr; // not found
 	}
 
 	/**
@@ -429,97 +540,77 @@ static void _InitializeAL()
 		int bytepos = (samplepos >= Size()) ? 0 : samplepos * SampleSize();
 		ClearStreamData(so);
 		LoadStreamData(so, bytepos);
-		if(wasPlaying) so->Play(); // resume playback
+		if (wasPlaying) 
+			so->Play(); // resume playback
 	}
 
-	/**
-	 * Gets the current sample position of the stream in the context of the bound SoundObject
-	 * @param so SoundObject to get sample position of
-	 * @return Sample position of the specified SoundObject
-	 */
-	int SoundStream::GetSamplePos(const SoundObject*const so) const
-	{
-		int index = GetIndexOf(so);
-		if(index == -1 || !alStream) return 0;
-		int bufferPos ; alGetSourcei(so->alSource, AL_BYTE_OFFSET, &bufferPos); // current offset in bytes
-		// add offsetting bufferPos and then convert to PCM Samples
-		return (alSources[index].base + bufferPos) / alStream->SampleSize();
-	}
+	//// PROTECTED: ////
 
 	/**
 	 * Internal stream function.
 	 * @param soe SoundObject Entry to stream
-	 * @return Number of buffers streamed and filled (usually 1).
+	 * @return TRUE if a buffer was streamed
 	 */
-	int SoundStream::Stream(SO_ENTRY& soe)
+	bool SoundStream::StreamNext(SO_ENTRY& e)
 	{
-		int streamNext = soe.next;
-		SoundObject* obj = soe.obj;
-		int alSource = obj->alSource;
-		if(streamNext >= alStream->Size()) // is EOF?
-			return 0;
+		if (e.next >= alStream->Size()) // is EOF?
+			return false;
 
-		int processed; alGetSourcei(alSource, AL_BUFFERS_PROCESSED, &processed);
-		if(processed) // buffers were processed
+		// front buffer was processed, swap buffers:
+		std::swap(e.front, e.back);
+
+		e.base = e.next; // shift the base pointer forward
+		if (e.back == xaBuffer) // we can't refill xaBuffer
 		{
-			ALuint buffer; alSourceUnqueueBuffers(alSource, 1, &buffer);
-			int size; alGetBufferi(buffer, AL_SIZE, &size);
-			soe.base += size; // base has increased (all of this buffer has been played)
-
-			if(buffer == alBuffer) // we can't refill alBuffer, since it's our 'first' buffer
-				buffer = CreateALBuffer(STREAM_BUFFERSIZE, alStream, &streamNext); // replace the buffer with a new one
-			else
-				FillALBuffer(buffer, alStream, &streamNext); // fill the existing buffer
-			soe.next = streamNext; // set new stream pos
-			alSourceQueueBuffers(alSource, 1, &buffer); // queue the buffer
-			return 1;
+			e.back = CreateXABuffer(this, STREAM_BUFFERSIZE, alStream, &e.next);
+			if (!e.back)
+				return false; // oh no...
+		}
+		else
+		{
+			if (!e.back) // no backbuffer. probably ClearStreamData() was called
+				return false;
+			StreamXABuffer(e.back, alStream, &e.next);
 		}
 
-		int state; alGetSourcei(alSource, AL_SOURCE_STATE, &state);
-		if(obj->State != state)
-		{
-			switch(obj->State) {
-			case AL_PLAYING: obj->Play(); break; // restart playing if we stopped playing for some reason..
-			case AL_STOPPED: obj->Stop(); break;
-			case AL_PAUSED: obj->Pause(); break;
-			case AL_INITIAL: obj->Rewind(); break;
-			}
-		}
-		return 0;
+		e.obj->Source->SubmitSourceBuffer(e.back); // submit the backbuffer to the queue
+		return true;
 	}
 
 	/**
 	 * [internal] Load streaming data into the specified SoundObject
 	 * at the optionally specified streamposition.
 	 * @param so SoundObject to queue with stream data
-	 * @param streampos [optional] PCM byte position in stream where to seek data from. If unspecified, stream will load data where this object's SO_ENTRY points.
+	 * @param streampos [optional] PCM byte position in stream where to seek data from. 
+	 *                  If unspecified (default -1), stream will use the current streampos
 	 */
 	bool SoundStream::LoadStreamData(SoundObject* so, int streampos)
 	{
-		int index = GetIndexOf(so);
-		if(index == -1) return false; // nothing to do here
-		int pos = streampos == -1 ? alSources[index].next : streampos; // -1: use next, else use streampos
+		SO_ENTRY* e = GetSOEntry(so);
+		if (!e) return false; // nothing to do here
+		int pos = streampos == -1 ? e->next : streampos; // -1: use next, else use streampos
 
 		int streamSize = alStream->Size() - pos; // lets calculate stream size from the SEEK position
 		int numBuffers = streamSize > STREAM_BUFFERSIZE ? 2 : 1;
-		alSources[index].base = pos;
+		e->base = pos;
 
-		if(pos == 0) // pos 0 means we load alBuffer
+		if (pos == 0) // pos 0 means we load alBuffer
 		{
-			alSourceQueueBuffers(so->alSource, 1, (ALuint*)&alBuffer); // queue alBuffer, which is always the 'first' buffer
-			pos += numBuffers == 1 ? streamSize : STREAM_BUFFERSIZE; // gotta update pos manually
+			pos += xaBuffer->AudioBytes; // update pos
+			so->Source->SubmitSourceBuffer(e->front = xaBuffer);
 		}
-		else
+		else // load at arbitrary position
 		{
-			int buffer = CreateALBuffer(STREAM_BUFFERSIZE, alStream, &pos); // first buffer at arbitrary position
-			alSourceQueueBuffers(so->alSource, 1, (ALuint*)&buffer);			
+			e->front = CreateXABuffer(this, STREAM_BUFFERSIZE, alStream, &pos);
+			so->Source->SubmitSourceBuffer(e->front);
 		}
-		if(numBuffers == 2)
+
+		if (numBuffers == 2) // also load a backbuffer
 		{
-			int buffer = CreateALBuffer(STREAM_BUFFERSIZE, alStream, &pos); // seek and load the 'second' buffer
-			alSourceQueueBuffers(so->alSource, 1, (ALuint*)&buffer);
+			e->back = CreateXABuffer(this, STREAM_BUFFERSIZE, alStream, &pos); 
+			so->Source->SubmitSourceBuffer(e->back);
 		}
-		alSources[index].next = pos;  // pos variable is updated by CreateALBuffer
+		e->next = pos;  // pos variable was updated by CreateXABuffer
 		return true;
 	}
 
@@ -529,17 +620,14 @@ static void _InitializeAL()
 	 */
 	void SoundStream::ClearStreamData(SoundObject* so)
 	{
-		int alSource = so->alSource;
-		alSourceStop(alSource); // stop the source if its playing
-		int queued; alGetSourcei(alSource, AL_BUFFERS_QUEUED, &queued);
-
-		for(int i = 0; i < queued; ++i) // unqueue all used buffers and delete them (except alBuffer!)
+		so->Source->Stop();
+		so->Source->FlushSourceBuffers();
+		if (SO_ENTRY* e = GetSOEntry(so))
 		{
-			ALuint buffer;
-			alSourceUnqueueBuffers(alSource, 1, &buffer);
-			if(alBuffer == buffer)
-				continue; // dont delete alBuffer!
-			alDeleteBuffers(1, &buffer);
+			if (e->front && e->front != xaBuffer)
+				delete e->front, e->front = nullptr;
+			if (e->back)
+				delete e->back, e->back = nullptr;
 		}
 	}
 
@@ -550,100 +638,56 @@ static void _InitializeAL()
 
 
 
-	static std::vector<ManagedSoundStream*> ManagedStreams;
-	static HANDLE Mutex = NULL;
-	static HANDLE ThreadHandle;
-	static DWORD ThreadID;
 
-	DWORD __stdcall SoundStreamManager(void* threadStart)
+
+
+
+
+
+
+	struct SoundObjectState : public IXAudio2VoiceCallback
 	{
-		while(true)
+		SoundObject* sound;
+		bool isInitial;		// is the Sound object Rewinded to its initial position?
+		bool isPlaying;		// is the Voice digesting buffers?
+		bool isLoopable;	// should this sound act as a loopable sound?
+		bool isPaused;		// currently paused?
+		XABuffer shallow;	// a shallow buffer reference (no actual data)
+
+		SoundObjectState(SoundObject* so) 
+			: sound(so), 
+			isInitial(false), isPlaying(false), 
+			isLoopable(false), isPaused(false)
 		{
-			WaitForSingleObject(Mutex, 100);
-			for(ManagedSoundStream* stream : ManagedStreams)
-				stream->Stream();
-			ReleaseMutex(Mutex);
-
-			Sleep(100); // this thread doesn't need to be very active
 		}
-	}
 
-	ManagedSoundStream::ManagedSoundStream()
-	{
-		_registerStream();
-	}
-
-	ManagedSoundStream::ManagedSoundStream(const char* file)
-	{
-		_registerStream();
-		Load(file);
-	}
-
-	void ManagedSoundStream::_registerStream()
-	{
-		if(!Mutex) 
+		// end of stream was reached (last buffer object was processed)
+		void __stdcall OnStreamEnd() override
 		{
-			Mutex = CreateMutexA(0, TRUE, 0);
-			ThreadHandle = CreateThread(0, 0, &SoundStreamManager, 0, 0, &ThreadID);
+			if (isLoopable) // loopable?
+				sound->Rewind(); // rewind the sound and continue playing
+			else
+				isPlaying = false;
 		}
-		WaitForSingleObject(Mutex, 100);
-		ManagedStreams.push_back(this);
-		ReleaseMutex(Mutex);
-	}
 
-	ManagedSoundStream::~ManagedSoundStream()
-	{
-		WaitForSingleObject(Mutex, 100);
-		// erase the stream
-		ManagedStreams.erase(std::find(ManagedStreams.begin(), ManagedStreams.end(), this));
-		if(ManagedStreams.size() == 0)
+		// a buffer object finished processing
+		void __stdcall OnBufferEnd(void* ctx) override
 		{
-			TerminateThread(ThreadHandle, 0);
-			CloseHandle(Mutex);
-			ThreadHandle = NULL;
-			ThreadID = 0;
-			Mutex = NULL;
+			isInitial = false;
+			if (((SoundBuffer*)ctx)->IsStream())
+			{
+				// stream fetch next buffer for this sound
+				((SoundStream*)ctx)->StreamNext(sound);
+			}
 		}
-		ReleaseMutex(Mutex);
-	}
 
+		void __stdcall OnVoiceProcessingPassStart(UINT32 samplesRequired) override {}
+		void __stdcall OnVoiceProcessingPassEnd() override {}
+		void __stdcall OnBufferStart(void* ctx) override {}
+		void __stdcall OnLoopEnd(void* ctx) override {}
+		void __stdcall OnVoiceError(void* ctx, HRESULT error) override {}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-	static inline int alSourceType(ALuint alSource) // returns the alSource type
-	{
-		int type; alGetSourcei(alSource, AL_SOURCE_TYPE, &type);
-		return type;
-	}
-
-
-
-
-
-
-
-
-
-
+	};
 
 
 
@@ -654,9 +698,11 @@ static void _InitializeAL()
 	 * Creates an uninitialzed empty SoundObject
 	 */
 	SoundObject::SoundObject()
-		: Sound(nullptr), State(AL_INITIAL)
+		: Sound(nullptr), Source(nullptr), State(nullptr)
 	{
-		alGenSources(1, &alSource);
+		memset(&Emitter, 0, sizeof(Emitter));
+		Emitter.ChannelCount = 1;
+		Emitter.CurveDistanceScaler = FLT_MIN;
 	}
 	/**
 	 * Creates a soundobject with an attached buffer
@@ -665,18 +711,20 @@ static void _InitializeAL()
 	 * @param play True if sound should start playing immediatelly
 	 */
 	SoundObject::SoundObject(SoundBuffer* sound, bool loop, bool play)
-		: Sound(nullptr), State(AL_INITIAL)
+		: Sound(nullptr), Source(nullptr), State(nullptr)
 	{
-		alGenSources(1, &alSource);
-		if(sound) SetSound(sound, loop);
-		if(play) Play();
+		memset(&Emitter, 0, sizeof(Emitter));
+		Emitter.ChannelCount = 1;
+		Emitter.CurveDistanceScaler = FLT_MIN;
+
+		if (sound) SetSound(sound, loop);
+		if (play) Play();
 	}
 
 	SoundObject::~SoundObject() // unhooks any sounds and frees resources
 	{
-		if(Sound) SetSound(nullptr);
-		alDeleteSources(1, &alSource);
-		alSource = 0;
+		if (Sound) SetSound(nullptr);
+		if (Source) Source->DestroyVoice(), Source = nullptr;
 	}
 
 
@@ -689,11 +737,25 @@ static void _InitializeAL()
 	 */
 	void SoundObject::SetSound(SoundBuffer* sound, bool loop)
 	{
-		if(Sound) Sound->UnbindSource(this);
-		if(Sound = sound) 
+		if (Sound) Sound->UnbindSource(this); // unbind old, but still keep it around
+		if (sound) // new sound?
 		{
+			if (!Source) // no Source object created yet? First init.
+			{
+				State = new SoundObjectState(this);
+				xEngine->CreateSourceVoice(&Source, sound->WaveFormat(), 0, 2.0F, State);
+			}
+			else if (sound->WaveFormatHash() != Sound->WaveFormatHash()) // WaveFormat has changed?
+			{
+				Source->DestroyVoice(); // Destroy old and re-create with new
+				xEngine->CreateSourceVoice(&Source, sound->WaveFormat(), 0, 2.0F, State);
+			}
 			sound->BindSource(this);
-			alSourcei(alSource, AL_LOOPING, (alSourceType(alSource) == AL_STREAMING) ? false : loop);
+			State->isInitial = true;
+			State->isPlaying = false;
+			State->isLoopable = loop;
+			State->isPaused = false;
+			Sound = sound; // set new Sound
 		}
 	}
 
@@ -702,7 +764,7 @@ static void _InitializeAL()
 	 */
 	bool SoundObject::IsStreamable() const
 	{
-		return Sound ? alSourceType(alSource) == AL_STREAMING : false;
+		return Sound && Sound->IsStream();
 	}
 
 	/**
@@ -710,28 +772,25 @@ static void _InitializeAL()
 	 */
 	bool SoundObject::IsEOS() const
 	{
-		if(!Sound || !IsStreamable()) return false; // not streamable
-		return ((SoundStream*)Sound)->IsEOS(this);
+		return Sound && Sound->IsStream() && ((SoundStream*)Sound)->IsEOS(this);
 	}
 
-	/**
-	 * Automatically streams new data if needed for this specific SoundObject
-	 * @return Number of buffers streamed. -1 if this SoundObject is not streamable or EOS was reached.
-	 */
-	int SoundObject::Stream()
-	{
-		if(!Sound || !IsStreamable() || IsEOS()) return -1; // not streamable
-		return ((SoundStream*)Sound)->Stream(this);
-	}
 
 	/**
 	 * Starts playing the sound. If the sound is already playing, it is rewinded and played again from the start.
 	 */
 	void SoundObject::Play()
 	{
-		State = AL_PLAYING;
-		alSourcePlay(alSource);
+		if (IsPlaying()) 
+			Rewind();			// rewind to start of stream and continue playing
+		else if (Source)
+		{
+			State->isPlaying = true;
+			State->isPaused = false;
+			Source->Start(); // continue if paused or suspended
+		}
 	}
+
 	/**
 	 * Starts playing a new sound. Any older playing sounds will be stopped and replaced with this sound.
 	 * @param sound SoundBuffer or SoundStream to start playing
@@ -747,16 +806,23 @@ static void _InitializeAL()
 	 */
 	void SoundObject::Stop()
 	{
-		State = AL_STOPPED;
-		alSourceStop(alSource);
+		if (Source && State->isPlaying) { // only if isPlaying, to avoid rewind
+			State->isPlaying = false;
+			State->isPaused = false;
+			Rewind(); // rewind does the Stop() and FlushBuffers() for us
+		}
 	}
 	/**
 	 * Temporarily pauses sound playback and doesn't unload any streaming buffers.
 	 */
 	void SoundObject::Pause()
 	{
-		State = AL_PAUSED;
-		alSourcePause(alSource);
+		if (Source)
+		{
+			State->isPlaying = false;
+			State->isPaused = true;
+			Source->Stop(); // Stop() effectively pauses playback
+		}
 	}
 	/**
 	 * If current status is Playing, then this rewinds to start of the soundbuffer/stream and starts playing again.
@@ -764,19 +830,20 @@ static void _InitializeAL()
 	 */
 	void SoundObject::Rewind()
 	{
-		bool wasPlaying = IsPlaying();
-		State = AL_INITIAL;
-
-		int type = alSourceType(alSource);
-		if(type == AL_STATIC) // buffer
+		bool wasPlaying = State->isPlaying;
+		if (Sound->IsStream()) // stream
 		{
-			alSourceRewind(alSource);
-			if(wasPlaying) Play();
+			((SoundStream*)Sound)->ResetStream(this);
 		}
-		else if(type == AL_STREAMING) // stream
+		else // stream
 		{
-			SoundStream* strm = (SoundStream*)Sound;
+			Sound->UnbindSource(this); // simply rebind the source
+			Sound->BindSource(this);
 		}
+		State->isInitial = true;
+		State->isPlaying = false;
+		State->isPaused = false;
+		if (wasPlaying) Play();
 	}
 
 	/**
@@ -784,32 +851,31 @@ static void _InitializeAL()
 	 */
 	bool SoundObject::IsPlaying() const
 	{
-		int state; alGetSourcei(alSource, AL_SOURCE_STATE, &state);
-		return state == AL_PLAYING;
+		return State && State->isPlaying;
 	}
+
 	/**
 	 * @return TRUE if the sound source is STOPPED.
 	 */
 	bool SoundObject::IsStopped() const
 	{
-		int state; alGetSourcei(alSource, AL_SOURCE_STATE, &state);
-		return state == AL_STOPPED;
+		return !State || !State->isPlaying;
 	}
+
 	/**
 	 * @return TRUE if the sound source is PAUSED.
 	 */
 	bool SoundObject::IsPaused() const
 	{
-		int state; alGetSourcei(alSource, AL_SOURCE_STATE, &state);
-		return state == AL_PAUSED;
+		return State && State->isPaused;
 	}
+
 	/**
 	 * @return TRUE if the sound source is at the beginning of the sound buffer.
 	 */
 	bool SoundObject::IsInitial() const
 	{
-		int state; alGetSourcei(alSource, AL_SOURCE_STATE, &state);
-		return state == AL_INITIAL;
+		return State && State->isInitial;
 	}
 
 
@@ -818,30 +884,26 @@ static void _InitializeAL()
 	 */
 	bool SoundObject::IsLooping() const
 	{
-		int state; alGetSourcei(alSource, AL_SOURCE_STATE, &state);
-		return state == AL_LOOPING;
+		return State && State->isLoopable;
 	}
+
 	/**
 	 * Sets the looping mode of the sound source.
 	 */
 	void SoundObject::Looping(bool looping)
 	{
-		if(alSourceType(alSource) == AL_STREAMING) // buffer
-			return; // cant set looping for AL_STREAMING, or it will break the logic
-		alSourcei(alSource, AL_LOOPING, looping);
+		if (State) State->isLoopable = looping;
 	}
 
 	/**
-	 * Indicates the gain (volume amplification) applied. Range [0.0..1.0] A value of 1.0 means un-attenuated/unchanged.
+	 * Indicates the gain (volume amplification) applied. Range [0.0f .. 1.0f]
 	 * Each division by 2 equals an attenuation of -6dB. Each multiplicaton with 2 equals an amplification of +6dB.
 	 * A value of 0.0 is meaningless with respect to a logarithmic scale; it is interpreted as zero volume - the channel is effectively disabled.
 	 * @param gain Gain value between 0.0..1.0
 	 */
-	void SoundObject::Volume(float gain)
+	void SoundObject::Volume(float volume)
 	{
-		if(gain < 0.0f) gain = 0.0f;
-		else if(gain > 1.0f) gain = 1.0f;
-		alSourcef(alSource, AL_GAIN, gain);
+		Source->SetVolume(volume);
 	}
 
 	/**
@@ -849,62 +911,9 @@ static void _InitializeAL()
 	 */
 	float SoundObject::Volume() const
 	{
-		float gain; alGetSourcef(alSource, AL_GAIN, &gain);
-		return gain;
-	}
-
-	/**
-	 * Sets the pitch multiplier for this SoundObject. Always positive. Range [0.5 - 2.0] Default 1.0.
-	 * @param pitch New pitch value to apply
-	 */
-	void SoundObject::Pitch(float pitch)
-	{
-		alSourcef(alSource, AL_PITCH, pitch);
-	}
-
-	/**
-	 * @return Current pitch value of this SoundObject. Range [0.5 - 2.0] Default 1.0.
-	 */
-	float SoundObject::Pitch() const
-	{
-		float pitch; alGetSourcef(alSource, AL_PITCH, &pitch);
-		return pitch;
-	}
-
-	/**
-	 * Sets the Minimum gain value, below which the sound will never drop. Range [0.0-1.0]. Default is 0.0f.
-	 * @param mingain Minimum gain value
-	 */
-	void SoundObject::MinGain(float mingain)
-	{
-		alSourcef(alSource, AL_MIN_GAIN, mingain);
-	}
-
-	/**
-	 * @return Minimum possible gain of this SoundObject, below which the sound will never drop. Default is 0.0f.
-	 */
-	float SoundObject::MinGain() const
-	{
-		float mingain; alGetSourcef(alSource, AL_MIN_GAIN, &mingain);
-		return mingain;
-	}
-
-	/**
-	 * Sets the Maximum gain value, over which the sound will never raise. Range [0.0-1.0].
-	 * @param maxgain Maximum gain value
-	 */
-	void SoundObject::MaxGain(float maxgain)
-	{
-		alSourcef(alSource, AL_MAX_GAIN, maxgain);
-	}
-
-	/**
-	 * @return Maximum possible gain of this SoundObject, over which the sound will never raise. Range [0.0-1.0].
-	 */
-	float SoundObject::MaxGain() const
-	{
-		float maxgain; alGetSourcef(alSource, AL_MAX_GAIN, &maxgain);
-		return maxgain;
+		float volume;
+		Source->GetVolume(&volume);
+		return volume;
 	}
 
 	/**
@@ -912,16 +921,10 @@ static void _InitializeAL()
 	 */
 	int SoundObject::PlaybackPos() const
 	{
-		if(!Sound) return 0;
-		if(alSourceType(alSource) == AL_STREAMING)
-		{
-			return ((SoundStream*)Sound)->GetSamplePos(this);
-		}
-		else // AL_STATIC
-		{
-			int offset;	alGetSourcei(alSource, AL_SAMPLE_OFFSET, &offset);
-			return offset;
-		}
+		if (!Source) return 0;
+		XAUDIO2_VOICE_STATE state;
+		Source->GetState(&state);
+		return (int)state.SamplesPlayed;
 	}
 
 	/**
@@ -929,11 +932,26 @@ static void _InitializeAL()
 	 */
 	void SoundObject::PlaybackPos(int seekpos)
 	{
-		if(!Sound) return;
-		if(alSourceType(alSource) == AL_STREAMING)
+		if (!Sound) return;
+		if (Sound->IsStream())
+		{
 			((SoundStream*)Sound)->Seek(this, seekpos); // seek the stream
-		else // AL_STATIC
-			alSourcei(alSource, AL_SAMPLE_OFFSET, seekpos);
+		}
+		else
+		{
+			// first create a shallow copy of the xaBuffer:
+			XABuffer& shallow = State->shallow = *Sound->xaBuffer;
+			shallow.PlayBegin = seekpos;
+			shallow.PlayLength = shallow.nPCMSamples - seekpos;
+
+			bool wasPlaying = State->isPlaying;
+			State->isPlaying = false;
+			State->isPaused = false;
+			Source->Stop();
+			Source->FlushSourceBuffers();
+			Source->SubmitSourceBuffer(&shallow);
+			if (wasPlaying) Play();
+		}
 	}
 
 	/**
@@ -941,8 +959,7 @@ static void _InitializeAL()
 	 */
 	int SoundObject::PlaybackSize() const
 	{
-		if(!Sound) return 0;
-		return Sound->Size();
+		return Sound ? Sound->Size() : 0;
 	}
 
 
@@ -951,9 +968,11 @@ static void _InitializeAL()
 	 */
 	int SoundObject::SamplesPerSecond() const
 	{
-		if(!Sound) return 0;
-		return Sound->Frequency();
+		return Sound ? Sound->Frequency() : 0;
 	}
+
+
+
 
 
 
@@ -990,10 +1009,10 @@ static void _InitializeAL()
 	 */
 	void Sound::Reset()
 	{
-		alSourcei(alSource, AL_SOURCE_RELATIVE, AL_TRUE); // all positions relative to the listener
-		alSourcef(alSource, AL_PITCH, 1.0f); // regular pitch
-		alSourcef(alSource, AL_GAIN, 1.0f); // regular waveheight
+
 	}
+
+
 
 
 
@@ -1027,13 +1046,18 @@ static void _InitializeAL()
 	 */
 	void Sound3D::Reset()
 	{
-		alSourcef(alSource, AL_PITCH, 1.0); // regular pitch
-		alSourcef(alSource, AL_GAIN, 1.0); // regular waveheight
-		
-		ALfloat v[] = { 0.0f, 0.0f, 0.0f };
-		alSourcefv(alSource, AL_POSITION, v);
-		alSourcefv(alSource, AL_VELOCITY, v);
-		alSourcefv(alSource, AL_DIRECTION, v);
+
+	}
+
+	/**
+	 * Sets the 3D position of this Sound3D object
+	 * @param x Position x component
+	 * @param y Position Y component
+	 * @param z Position z component
+	 */
+	void Sound3D::Position(float x, float y, float z)
+	{
+
 	}
 
 	/**
@@ -1042,7 +1066,6 @@ static void _InitializeAL()
 	 */
 	void Sound3D::Position(float* xyz)
 	{
-		alSourcefv(alSource, AL_POSITION, xyz);
 	}
 
 	/**
@@ -1051,8 +1074,18 @@ static void _InitializeAL()
 	Vector3 Sound3D::Position() const
 	{
 		float xyz[3];
-		alGetSourcefv(alSource, AL_POSITION, xyz);
 		return Vector3(xyz[0], xyz[1], xyz[2]);
+	}
+
+	/**
+	 * Sets the 3D direction of this Sound3D object
+	 * @param x Direction x component
+	 * @param y Direction Y component
+	 * @param z Direction z component
+	 */
+	void Sound3D::Direction(float x, float y, float z)
+	{
+
 	}
 
 	/**
@@ -1061,7 +1094,6 @@ static void _InitializeAL()
 	 */
 	void Sound3D::Direction(float* xyz)
 	{
-		alSourcefv(alSource, AL_DIRECTION, xyz);
 	}
 
 	/**
@@ -1070,8 +1102,18 @@ static void _InitializeAL()
 	Vector3 Sound3D::Direction() const
 	{
 		float xyz[3];
-		alGetSourcefv(alSource, AL_DIRECTION, xyz);
 		return Vector3(xyz[0], xyz[1], xyz[2]);
+	}
+
+	/**
+	 * Sets the 3D velocity of this Sound3D object
+	 * @param x Velocity x component
+	 * @param y Velocity Y component
+	 * @param z Velocity z component
+	 */
+	void Sound3D::Velocity(float x, float y, float z)
+	{
+
 	}
 
 	/**
@@ -1080,7 +1122,6 @@ static void _InitializeAL()
 	 */
 	void Sound3D::Velocity(float* xyz)
 	{
-		alSourcefv(alSource, AL_VELOCITY, xyz);
 	}
 
 	/**
@@ -1089,7 +1130,6 @@ static void _InitializeAL()
 	Vector3 Sound3D::Velocity() const
 	{
 		float xyz[3];
-		alGetSourcefv(alSource, AL_VELOCITY, xyz);
 		return Vector3(xyz[0], xyz[1], xyz[2]);
 	}
 
@@ -1099,7 +1139,6 @@ static void _InitializeAL()
 	 */
 	void Sound3D::Relative(bool isrelative)
 	{
-		alSourcei(alSource, AL_SOURCE_RELATIVE, isrelative);
 	}
 
 	/**
@@ -1107,59 +1146,48 @@ static void _InitializeAL()
 	 */
 	bool Sound3D::IsRelative() const
 	{
-		int value; alGetSourcei(alSource, AL_SOURCE_RELATIVE, &value);
-		return value ? true : false;
+		return false;
 	}
 
 
 	void Sound3D::MaxDistance(float maxdist)
 	{
-		alSourcef(alSource, AL_MAX_DISTANCE, maxdist);
 	}
 	float Sound3D::MaxDistance() const
 	{
-		float value; alGetSourcef(alSource, AL_MAX_DISTANCE, &value);
-		return value;
+		return 0.0f;
 	}
 
 	void Sound3D::RolloffFactor(float rolloff)
 	{
-		alSourcef(alSource, AL_ROLLOFF_FACTOR, rolloff);
 	}
 	float Sound3D::RolloffFactor() const
 	{
-		float value; alGetSourcef(alSource, AL_ROLLOFF_FACTOR, &value);
-		return value;
+		return 0.0f;
 	}
 
 	void Sound3D::ReferenceDistance(float refdist)
 	{
-		alSourcef(alSource, AL_REFERENCE_DISTANCE, refdist);
 	}
 	float Sound3D::ReferenceDistance() const
 	{
-		float value; alGetSourcef(alSource, AL_REFERENCE_DISTANCE, &value);
-		return value;
+		return 0.0f;
 	}
 
 	void Sound3D::ConeOuterGain(float value)
 	{
-		alSourcef(alSource, AL_CONE_OUTER_GAIN, value);
 	}
 	float Sound3D::ConeOuterGain() const
 	{
-		float value; alGetSourcef(alSource, AL_CONE_OUTER_GAIN, &value);
-		return value;
+		return 0.0f;
 	}
 
 	void Sound3D::ConeInnerAngle(float angle)
 	{
-		alSourcef(alSource, AL_CONE_INNER_ANGLE, angle);
 	}
 	float Sound3D::ConeInnerAngle() const
 	{
-		float value; alGetSourcef(alSource, AL_CONE_INNER_ANGLE, &value);
-		return value;
+		return 0.0f;
 	}
 
 	/**
@@ -1170,14 +1198,12 @@ static void _InitializeAL()
 	void Sound3D::ConeOuterAngle(float angle)
 	{
 		float innerAngle = ConeInnerAngle();
-		if(angle < innerAngle)
+		if (angle < innerAngle)
 			angle = innerAngle;
-		alSourcef(alSource, AL_CONE_OUTER_ANGLE, angle);
 	}
 	float Sound3D::ConeOuterAngle() const
 	{
-		float value; alGetSourcef(alSource, AL_CONE_OUTER_ANGLE, &value);
-		return value;
+		return 0.0f;
 	}
 
 
@@ -1197,10 +1223,10 @@ static void _InitializeAL()
 	 * until the sound starts distorting. WARNING! This does not change system volume!
 	 * @param gain Gain value to set for the listener. Range[0.0 - Any].
 	 */
-	void Listener::Gain(float gain)
+	void Listener::Volume(float gain)
 	{
-		if(gain < 0.0f) gain = 0.0f;
-		alListenerf(AL_GAIN, gain);
+		if (gain < 0.0f) gain = 0.0f;
+		xMaster->SetVolume(gain);
 	}
 
 	/**
@@ -1209,10 +1235,31 @@ static void _InitializeAL()
 	 * until the sound starts distorting. WARNING! This does not change system volume!
 	 * @return Master gain value (Volume). Range[0.0 - Any].
 	 */
-	float Listener::Gain()
+	float Listener::Volume()
 	{
-		float value; alGetListenerf(AL_GAIN, &value);
+		float value;
+		xMaster->GetVolume(&value);
 		return value;
+	}
+
+	/**
+	 * Sets the position of the listener object for Audio3D
+	 * @param pos Vector containing x y z components of the position
+	 */
+	void Listener::Position(const Vector3& pos)
+	{
+
+	}
+
+	/**
+	 * Sets the position of the listener object for Audio3D
+	 * @param x X component of the new position
+	 * @param y Y component of the new position
+	 * @param z Z component of the new position
+	 */
+	void Listener::Position(float x, float y, float z)
+	{
+
 	}
 
 	/**
@@ -1221,7 +1268,7 @@ static void _InitializeAL()
 	 */
 	void Listener::Position(float* xyz)
 	{
-		alListenerfv(AL_POSITION, xyz);
+
 	}
 
 	/**
@@ -1230,8 +1277,27 @@ static void _InitializeAL()
 	Vector3 Listener::Position()
 	{
 		float xyz[3];
-		alGetListenerf(AL_POSITION, xyz);
 		return Vector3(xyz[0], xyz[1], xyz[2]);
+	}
+
+	/**
+	 * Sets the velocity of the listener object for Audio3D
+	 * @param pos Vector containing x y z components of the velocity
+	 */
+	void Listener::Velocity(const Vector3& vel)
+	{
+
+	}
+
+	/**
+	 * Sets the velocity of the listener object for Audio3D
+	 * @param x X component of the new velocity
+	 * @param y Y component of the new velocity
+	 * @param z Z component of the new velocity
+	 */
+	void Listener::Velocity(float x, float y, float z)
+	{
+
 	}
 
 	/**
@@ -1240,7 +1306,6 @@ static void _InitializeAL()
 	 */
 	void Listener::Velocity(float* xyz)
 	{
-		alListenerfv(AL_VELOCITY, xyz);
 	}
 
 	/**
@@ -1249,7 +1314,6 @@ static void _InitializeAL()
 	Vector3 Listener::Velocity()
 	{
 		float xyz[3];
-		alGetListenerf(AL_VELOCITY, xyz);
 		return Vector3(xyz[0], xyz[1], xyz[2]);
 	}
 
@@ -1258,9 +1322,20 @@ static void _InitializeAL()
 	 * @param target Vector containing x y z components of target where to 'look', thus changing the orientation.
 	 * @param up Vector containing x y z components of the orientation 'up' vector
 	 */
-	void Listener::LookAt(Vector3& target, Vector3& up)
+	void Listener::LookAt(const Vector3& target, const Vector3& up)
 	{
 		LookAt(target.x, target.y, target.z, up.x, up.y, up.z);
+	}
+
+	/**
+	 * Sets the direction of the listener object for Audio3D
+	 * @param x X component of the new direction
+	 * @param y Y component of the new direction
+	 * @param z Z component of the new direction
+	 */
+	void Listener::LookAt(float xAT, float yAT, float zAT, float xUP, float yUP, float zUP)
+	{
+		LookAt(Vector3(xAT, yAT, zAT), Vector3(xUP, yUP, zUP));
 	}
 
 	/**
@@ -1269,7 +1344,6 @@ static void _InitializeAL()
 	 */
 	void Listener::LookAt(float* xyzATxyzUP)
 	{
-		alListenerfv(AL_ORIENTATION, xyzATxyzUP);
 	}
 
 	/**
@@ -1278,7 +1352,6 @@ static void _InitializeAL()
 	Vector3 Listener::Target()
 	{
 		float xyzATxyzUP[6];
-		alGetListenerfv(AL_ORIENTATION, xyzATxyzUP);
 		return Vector3(xyzATxyzUP[0], xyzATxyzUP[1], xyzATxyzUP[2]);
 	}
 
@@ -1288,7 +1361,6 @@ static void _InitializeAL()
 	Vector3 Listener::Up()
 	{
 		float xyzATxyzUP[6];
-		alGetListenerfv(AL_ORIENTATION, xyzATxyzUP);
 		return Vector3(xyzATxyzUP[3], xyzATxyzUP[4], xyzATxyzUP[5]);
 	}
 

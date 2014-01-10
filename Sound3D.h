@@ -19,22 +19,48 @@
  * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE 
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include "AudioStreamer.h"
 #include <vector>
+#include "XAudio2_7\XAudio2.h"	// from DirectX SDK 2010
+#include "XAudio2_7\X3DAudio.h" // from DirectX SDK 2010
 
-namespace S3D {
+
+namespace S3D
+{
 
 #if !VECTOR3_DEFINED
-	struct Vector3
-	{
-		float x, y, z;
-		inline Vector3() : x(0), y(0), z(0) {}
-		inline Vector3(float x, float y, float z) : x(x), y(y), z(z) {}
-	};
+struct Vector3
+{
+	float x, y, z;
+	inline Vector3() : x(0), y(0), z(0) {}
+	inline Vector3(float x, float y, float z) : x(x), y(y), z(z) {}
+};
 #endif
 
+
+
+/**
+ * A Sound Object contains data on Sound playing state, volume, 3D position, etc.
+ */
 class SoundObject;
+
+
+
+/** 
+ * Our XAudio buffer object
+ */
+struct XABuffer : XAUDIO2_BUFFER
+{
+	WAVEFORMATEX wf;		// wave format descriptor
+	int nBytesPerSample;	// number of bytes per single sample
+	int nPCMSamples;		// number of PCM samples in the entire buffer
+	unsigned wfHash;		// waveformat pseudo-hash
+};
+
+
 
 /**
  * A simple SoundBuffer designed for loading small sound files into a static buffer.
@@ -42,30 +68,87 @@ class SoundObject;
  */
 class SoundBuffer
 {
+	friend class SoundObject;
+
 protected:
-	unsigned int alBuffer; // buffer object
-	int refCount; // number of references of this buffer held by SoundObjects; NOTE: SoundBuffer can't be Unloaded until refCount == 0.
+
+	// number of references of this buffer held by SoundObjects; 
+	// NOTE: SoundBuffer can't be Unloaded until refCount == 0.
+	int refCount;				
+	XABuffer* xaBuffer;			// sound buffer object
 	
 public:
-	SoundBuffer();	// creates a new SoundBuffer object
+
+	/**
+	 * Creates a new SoundBuffer object
+	 */
+	SoundBuffer();
+
 	/**
 	 * Creates a new SoundBuffer and loads the specified sound file
 	 * @param file Path to sound file to load
 	 */
 	SoundBuffer(const char* file);
-	virtual ~SoundBuffer(); // destroys and unloads this buffer
 
-	int Frequency() const;	// @return Frequency in Hz of this SoundBuffer data
-	int SampleBits() const;	// @return Number of bits in a sample of this SoundBuffer data (8 or 16)
-	int SampleBytes() const;// @return Number of bytes in a sample of this SoundBuffer data (1 or 2)
-	int Channels() const;	// @return Number of sound channels in the SoundBuffer data (1 or 2)
-	int SampleSize() const;	// @return Size of a sample block in bytes [LL][RR] (1 to 4)
-	inline int SizeBytes() const { return SampleSize() * Size(); } // @return Size of this SoundBuffer or SoundStream in BYTES
 	/**
-	 * @note For a SoundStream object, this returns the entire stream size in bytes!
+	 * Destroyes and unloads this buffer
+	 */
+	virtual ~SoundBuffer();
+
+	/**
+	 * @return Frequency in Hz of this SoundBuffer data
+	 */
+	int Frequency() const;
+
+	/**
+	 * @return Number of bits in a sample of this SoundBuffer data (8 or 16)
+	 */
+	int SampleBits() const;	
+
+	/**
+	 * @return Number of bytes in a sample of this SoundBuffer data (1 or 2)
+	 */
+	int SampleBytes() const;
+
+	/**
+	 * @return Number of sound channels in the SoundBuffer data (1 or 2)
+	 */
+	int Channels() const;	
+
+	/** 
+	 * @return Size of a sample block in bytes [LL][RR] (1 to 4)
+	 */
+	int SampleSize() const;
+
+	/**
+	 * @return Size of this SoundBuffer or SoundStream in BYTES
+	 */
+	int SizeBytes() const;
+
+	/**
 	 * @return Size of this SoundBuffer in PCM SAMPLES
 	 */
-	virtual int Size() const;			
+	virtual int Size() const;		
+
+	/**
+	 * @return Number of SoundObjects that still reference this SoundBuffer.
+	 */
+	int RefCount() const;
+
+	/**
+	 * @return TRUE if this object is a Sound stream
+	 */
+	virtual bool IsStream() const;
+
+	/**
+	 * @return Wave format descriptor for this buffer
+	 */
+	const WAVEFORMATEX* WaveFormat() const;
+
+	/**
+	 * @return Unique hash to distinguish between different Wave formats
+	 */
+	unsigned WaveFormatHash() const;	
 
 	/**
 	 * Loads this SoundBuffer with data found in the specified file.
@@ -85,7 +168,7 @@ public:
 	/**
 	 * Binds a specific source to this SoundBuffer and increases the refCount.
 	 * @param so SoundObject to bind to this SoundBuffer.
-	 * @return FALSE is the binding failed. TODO: POSSIBLE REASONS?
+	 * @return FALSE if the binding failed. TODO: POSSIBLE REASONS?
 	 */
 	virtual bool BindSource(SoundObject* so);
 
@@ -96,12 +179,20 @@ public:
 	 */
 	virtual bool UnbindSource(SoundObject* so);
 
-
 	/**
-	 * @return Number of SoundObjects that still reference this SoundBuffer.
+	 * Resets the buffer in the context of the specified SoundObject
+	 * @note Calls ResetStream on AudioStreams.
+	 * @param so SoundObject to reset this buffer for
+	 * @return TRUE if reset was successful
 	 */
-	inline int RefCount() const { return refCount; }
+	virtual bool ResetBuffer(SoundObject* so);
+
 };
+
+
+
+
+
 
 
 
@@ -113,26 +204,52 @@ public:
 class SoundStream : public SoundBuffer
 {
 protected:
-	struct SO_ENTRY { SoundObject* obj; unsigned base, next; inline SO_ENTRY(SoundObject* obj, unsigned base, unsigned next) : obj(obj), base(base), next(next) {} };
-	static const int STREAM_BUFFERSIZE = 65536;	// 64KB
-	std::vector<SO_ENTRY> alSources; // bound sources
-	AudioStreamer* alStream;		// streamer object
+	struct SO_ENTRY 
+	{ 
+		SoundObject* obj; 
+		int base; // current PCM block offset
+		int next; // the next PCM block offset to load
 
+		XABuffer* front;	// currently playing buffer - frontbuffer
+		XABuffer* back;		// enqueued backbuffer
+
+		inline SO_ENTRY(SoundObject* obj, int base, int next) 
+			: obj(obj), base(base), next(next), front(0), back(0)
+		{
+		} 
+	};
+	static const int STREAM_BUFFERSIZE = 65536;	// 64KB
+	
+	std::vector<SO_ENTRY> alSources;	// bound sources
+	AudioStreamer* alStream;			// streamer object
 
 public:
-	SoundStream(); // creates a new SoundStream object
+
+	/**
+	 * Creates a new SoundsStream object
+	 */
+	SoundStream();
+
 	/**
 	 * Creates a new SoundStream object and loads the specified sound file
 	 * @param file Path to the sound file to load
 	 */
 	SoundStream(const char* file);
-	virtual ~SoundStream(); // destroys and unloads any resources held
 
 	/**
-	 * @note For a SoundStream object, this returns the entire stream size in bytes!
+	 * Destroys and unloads any resources held
+	 */
+	virtual ~SoundStream();
+
+	/**
 	 * @return Size of this SoundStream in PCM SAMPLES
 	 */
-	virtual int Size() const;
+	virtual int Size() const override;
+
+	/**
+	 * @return TRUE if this object is a Sound stream
+	 */
+	virtual bool IsStream() const override;
 
 	/**
 	 * Initializes this SoundStream with data found in the specified file.
@@ -140,47 +257,50 @@ public:
 	 * @param file Sound file to load
 	 * @return TRUE if loading succeeded and a stream was initialized.
 	 */
-	virtual bool Load(const char* file);
+	virtual bool Load(const char* file) override;
 
 	/**
 	 * Tries to release the underlying sound buffers and free the memory.
 	 * @note This function will fail if refCount > 0. This means there are SoundObjects still using this SoundStream
 	 * @return TRUE if SoundStream data was freed, FALSE if SoundStream is still used by a SoundObject.
 	 */
-	virtual bool Unload();
+	virtual bool Unload() override;
 
 	/**
 	 * Binds a specific source to this SoundStream and increases the refCount.
 	 * @param so SoundObject to bind to this SoundStream.
-	 * @return FALSE is the binding failed. TODO: POSSIBLE REASONS?
+	 * @return FALSE if the binding failed. TODO: POSSIBLE REASONS?
 	 */
-	virtual bool BindSource(SoundObject* so);
+	virtual bool BindSource(SoundObject* so) override;
 
 	/**
 	 * Unbinds a specific source from this SoundStream and decreases the refCount.
 	 * @param so SoundObject to unbind from this SoundStream.
 	 * @return FALSE if the unbinding failed. TODO: POSSIBLE REASONS?
 	 */
-	virtual bool UnbindSource(SoundObject* so);
-
+	virtual bool UnbindSource(SoundObject* so) override;
 
 	/**
-	 * Streams more sound data from the AudioStream if needed.
-	 * This method can be called several times with no impact - the buffers
-	 * are only filled ON-DEMAND. This method is simply the trigger mechanism.
-	 * All the bound SoundObjects are streamed and updated.
-	 * @return Number of buffers streamed and filled.
+	 * Resets the buffer in the context of the specified SoundObject
+	 * @note Calls ResetStream on AudioStreams.
+	 * @param so SoundObject to reset this buffer for
+	 * @return TRUE if reset was successful
 	 */
-	int Stream();
+	virtual bool ResetBuffer(SoundObject* so) override;
 
 	/**
-	 * Streams more sound data from the AudioStream if needed.
-	 * This method can be called several times with no impact - the buffers
-	 * are only filled ON-DEMAND. This method is simply the trigger mechanism.
+	 * Resets the stream by unloading previous buffers and requeuing the first two buffers.
+	 * @param so SoundObject to reset the stream for
+	 * @return TRUE if stream was successfully reloaded
+	 */
+	bool ResetStream(SoundObject* so);
+
+	/**
+	 * Streams the next Buffer block from the stream.
 	 * @param so Specific SoundObject to stream with.
-	 * @return Number of buffers streamed and filled.
+	 * @return TRUE if a buffer was streamed. FALSE if EOS()
 	 */
-	int Stream(SoundObject* so);
+	bool StreamNext(SoundObject* so);
 
 	/**
 	 * @param so Specific SoundObject to check for end of stream
@@ -190,15 +310,9 @@ public:
 
 	/**
 	 * @param so SoundObject to query index of
-	 * @return A valid index [0...n] if this SoundObject is bound. [-1] if it's not bound.
+	 * @return A valid pointer if this SoundObject is bound. Otherwise NULL.
 	 */
-	int GetIndexOf(const SoundObject* so) const;
-
-	/**
-	 * Resets the stream by unloading previous buffers and requeuing the first two buffers.
-	 * @param so SoundObject to reset the stream for
-	 */
-	void ResetStream(SoundObject* so);
+	SO_ENTRY* GetSOEntry(const SoundObject* so) const;
 
 	/**
 	 * Seeks to the specified sample position in the stream
@@ -207,28 +321,21 @@ public:
 	 */
 	void Seek(SoundObject* so, int samplepos);
 
-	/**
-	 * Gets the current sample position of the stream in the context of the bound SoundObject
-	 * @param so SoundObject to get sample position of
-	 * @return Sample position of the specified SoundObject
-	 */
-	int GetSamplePos(const SoundObject*const so) const;
-
-
 protected:
 
 	/**
 	 * Internal stream function.
 	 * @param soe SoundObject Entry to stream
-	 * @return Number of buffers streamed and filled (usually 1).
+	 * @return TRUE if a buffer was streamed
 	 */
-	int Stream(SO_ENTRY& soe);
+	bool StreamNext(SO_ENTRY& soe);
 
 	/**
 	 * [internal] Load streaming data into the specified SoundObject
 	 * at the optionally specified streamposition.
 	 * @param so SoundObject to queue with stream data
-	 * @param streampos [optional] Position in stream where to seek data from. If unspecified, stream will load data where this object's SO_ENTRY points.
+	 * @param streampos [optional] PCM byte position in stream where to seek data from. 
+	 *                  If unspecified (default -1), stream will use the current streampos
 	 */
 	bool LoadStreamData(SoundObject* so, int streampos = -1);
 
@@ -244,29 +351,16 @@ protected:
 
 
 
+
+
+
+
+
+
 /**
- * A SoundStream that is automatically managed by a lazy-init thread.
- * The thread is created when the first ManagedSoundStream is created
- * and deleted when the last ManagedSoundStream instance is deleted.
+ * Holds and manages the current state of a SoundObject
  */
-class ManagedSoundStream : public SoundStream
-{
-public:
-	ManagedSoundStream();
-	/**
-	 * Creates a new ManagedSoundStream object and loads the specified sound file
-	 * @param file Path to the sound file to load
-	 */
-	ManagedSoundStream(const char* file);
-	~ManagedSoundStream();
-
-private:
-	void _registerStream();
-};
-
-
-
-
+struct SoundObjectState; 
 
 
 
@@ -276,11 +370,12 @@ private:
 class SoundObject
 {
 protected:
-	friend class SoundBuffer; // give soundbuffer access to the internals of this object
-	friend class SoundStream; // give soundstream access to the internals of this object
-	SoundBuffer* Sound;		// soundbuffer or stream to use
-	unsigned alSource; // OpenAL source
-	int State; // internal soundobject state
+	friend class SoundBuffer;			// give soundbuffer access to the internals of this object
+	friend class SoundStream;			// give soundstream access to the internals of this object
+	SoundBuffer* Sound;					// soundbuffer or stream to use
+	IXAudio2SourceVoice* Source;		// the sound source generator (interfaces XAudio2 to generate waveforms)
+	SoundObjectState* State;			// Holds and manages the current state of a SoundObject
+	X3DAUDIO_EMITTER Emitter;			// 3D sound emitter data (this object)
 
 	/**
 	 * Creates an uninitialzed empty SoundObject
@@ -319,12 +414,6 @@ public:
 	bool IsEOS() const;
 
 	/**
-	 * Automatically streams new data if needed for this specific SoundObject
-	 * @return Number of buffers streamed. -1 if this SoundObject is not streamable or EOS was reached.
-	 */
-	int Stream();
-
-	/**
 	 * Starts playing the sound. If the sound is already playing, it is rewinded and played again from the start.
 	 */
 	void Play();
@@ -335,50 +424,55 @@ public:
 	 * @param loop [false] Sets if the sound is looping or not. Streams are never loopable.
 	 */
 	void Play(SoundBuffer* sound, bool loop = false);
+
 	/**
 	 * Stops playing the sound and unloads streaming buffers.
 	 */
 	void Stop();
+
 	/**
 	 * Temporarily pauses sound playback and doesn't unload any streaming buffers.
 	 */
 	void Pause();
+
 	/**
 	 * If current status is Playing, then this rewinds to start of the soundbuffer/stream and starts playing again.
 	 * If current status is NOT playing, then any stream resources are freed and the object is reset.
 	 */
 	void Rewind();
 
-
 	/**
 	 * @return TRUE if the sound source is PLAYING.
 	 */
 	bool IsPlaying() const;
+
 	/**
 	 * @return TRUE if the sound source is STOPPED.
 	 */
 	bool IsStopped() const;
+
 	/**
 	 * @return TRUE if the sound source is PAUSED.
 	 */
 	bool IsPaused() const;
+
 	/**
 	 * @return TRUE if the sound source is at the beginning of the sound buffer.
 	 */
 	bool IsInitial() const;
 
-
 	/**
 	 * @return TRUE if the sound source is in LOOPING mode.
 	 */
 	bool IsLooping() const;
+
 	/**
 	 * Sets the looping mode of the sound source.
 	 */
 	void Looping(bool looping);
 
 	/**
-	 * Indicates the gain (volume amplification) applied. Range [0.0..1.0] A value of 1.0 means un-attenuated/unchanged.
+	 * Indicates the gain (volume amplification) applied. Range [0.0f .. 1.0f]
 	 * Each division by 2 equals an attenuation of -6dB. Each multiplicaton with 2 equals an amplification of +6dB.
 	 * A value of 0.0 is meaningless with respect to a logarithmic scale; it is interpreted as zero volume - the channel is effectively disabled.
 	 * @param gain Gain value between 0.0..1.0
@@ -389,39 +483,6 @@ public:
 	 * @return Current gain value of this source
 	 */
 	float Volume() const;
-
-	/**
-	 * Sets the pitch multiplier for this SoundObject. Always positive. Range [0.5 - 2.0] Default 1.0.
-	 * @param pitch New pitch value to apply
-	 */
-	void Pitch(float pitch);
-
-	/**
-	 * @return Current pitch value of this SoundObject. Range [0.5 - 2.0] Default 1.0.
-	 */
-	float Pitch() const;
-
-	/**
-	 * Sets the Minimum gain value, below which the sound will never drop. Range [0.0-1.0]. Default is 0.0f.
-	 * @param mingain Minimum gain value
-	 */
-	void MinGain(float mingain);
-
-	/**
-	 * @return Minimum possible gain of this SoundObject, below which the sound will never drop. Default is 0.0f.
-	 */
-	float MinGain() const;
-
-	/**
-	 * Sets the Maximum gain value, over which the sound will never raise. Range [0.0-1.0].
-	 * @param maxgain Maximum gain value
-	 */
-	void MaxGain(float maxgain);
-
-	/**
-	 * @return Maximum possible gain of this SoundObject, over which the sound will never raise. Range [0.0-1.0].
-	 */
-	float MaxGain() const;
 
 	/**
 	 * @return Gets the current playback position in the SoundBuffer or SoundStream in SAMPLES
@@ -446,17 +507,21 @@ public:
 };
 
 
+
+
 /**
  * A positionless sound object used for playing background music or sounds.
  */
 class Sound : public SoundObject
 {
 public:
+
 	/**
 	 * Creates an uninitialzed Sound2D, but also
 	 * setups the sound source as an environment/bakcground sound.
 	 */
 	Sound();
+
 	/**
 	 * Creates a Sound2D with an attached buffer
 	 * @param sound SoundBuffer/SoundStream this object can use for playing sounds
@@ -471,17 +536,22 @@ public:
 	void Reset();
 };
 
+
+
+
 /**
  * A 3D positional sound object used for playing environment-aware music or sounds.
  */
 class Sound3D : public SoundObject
 {
 public:
+
 	/**
 	 * Creates an uninitialzed Sound3D, but also
 	 * setups the sound source as a 3D positional sound.
 	 */
 	Sound3D();
+
 	/**
 	 * Creates a Sound3D with an attached buffer
 	 * @param sound SoundBuffer/SoundStream this object can use for playing sounds
@@ -501,7 +571,7 @@ public:
 	 * @param y Position Y component
 	 * @param z Position z component
 	 */
-	inline void Position(float x, float y, float z) { Position(&x); }
+	void Position(float x, float y, float z);
 
 	/**
 	 * Sets the 3D position of this Sound3D object
@@ -520,7 +590,7 @@ public:
 	 * @param y Direction Y component
 	 * @param z Direction z component
 	 */
-	inline void Direction(float x, float y, float z) { Direction(&x); }
+	void Direction(float x, float y, float z);
 	
 	/**
 	 * Sets the 3D direction of this Sound3D object
@@ -539,7 +609,7 @@ public:
 	 * @param y Velocity Y component
 	 * @param z Velocity z component
 	 */
-	inline void Velocity(float x, float y, float z) { Velocity(&x); }
+	void Velocity(float x, float y, float z);
 
 	/**
 	 * Sets the 3D velocity of this Sound3D object
@@ -644,7 +714,7 @@ public:
 	 * until the sound starts distorting. WARNING! This does not change system volume!
 	 * @param gain Gain value to set for the listener. Range[0.0 - Any].
 	 */
-	static void Gain(float gain);
+	static void Volume(float gain);
 
 	/**
 	 * Gets the master gain value (Volume) of the listener object for Audio3D.
@@ -652,13 +722,13 @@ public:
 	 * until the sound starts distorting. WARNING! This does not change system volume!
 	 * @return Master gain value (Volume). Range[0.0 - Any].
 	 */
-	static float Gain();
+	static float Volume();
 
 	/**
 	 * Sets the position of the listener object for Audio3D
 	 * @param pos Vector containing x y z components of the position
 	 */
-	static inline void Position(Vector3& pos) { Position(&pos.x); }
+	static void Position(const Vector3& pos);
 
 	/**
 	 * Sets the position of the listener object for Audio3D
@@ -666,7 +736,7 @@ public:
 	 * @param y Y component of the new position
 	 * @param z Z component of the new position
 	 */
-	static inline void Position(float x, float y, float z) { Position(&x); }
+	static void Position(float x, float y, float z);
 
 	/**
 	 * Sets the position of the listener object for Audio3D
@@ -683,7 +753,7 @@ public:
 	 * Sets the velocity of the listener object for Audio3D
 	 * @param pos Vector containing x y z components of the velocity
 	 */
-	static inline void Velocity(Vector3& vel) { Velocity(&vel.x); }
+	static void Velocity(const Vector3& vel);
 
 	/**
 	 * Sets the velocity of the listener object for Audio3D
@@ -691,7 +761,7 @@ public:
 	 * @param y Y component of the new velocity
 	 * @param z Z component of the new velocity
 	 */
-	static inline void Velocity(float x, float y, float z) { Velocity(&x); }
+	static void Velocity(float x, float y, float z);
 
 	/**
 	 * Sets the velocity of the listener object for Audio3D
@@ -709,7 +779,7 @@ public:
 	 * @param target Vector containing x y z components of target where to 'look', thus changing the orientation.
 	 * @param up Vector containing x y z components of the orientation 'up' vector
 	 */
-	static void LookAt(Vector3& target, Vector3& up);
+	static void LookAt(const Vector3& target, const Vector3& up);
 
 	/**
 	 * Sets the direction of the listener object for Audio3D
@@ -717,7 +787,7 @@ public:
 	 * @param y Y component of the new direction
 	 * @param z Z component of the new direction
 	 */
-	static inline void LookAt(float xAT, float yAT, float zAT, float xUP, float yUP, float zUP) { LookAt(&xAT); }
+	static void LookAt(float xAT, float yAT, float zAT, float xUP, float yUP, float zUP);
 
 	/**
 	 * Sets the direction of the listener object for Audio3D

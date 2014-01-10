@@ -18,10 +18,10 @@
  * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE 
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-
-
 #include "AudioStreamer.h"
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <Windows.h> // LoadLibrary, FreeLibrary
 #include <stdio.h> // fopen
 #include <stdlib.h> // printf
@@ -667,7 +667,9 @@ static void _InitVorbis()
 		int bytesTotal = 0; // total bytes read
 		do 
 		{
-			// TODO: Find the mysterious Ogg stream error
+			// TODO: Fix Ogg stream error:
+			//       File handles are not shared, so creating 2x of the same stream can fail
+			//       Find a way to share the stream or the data
 			int bytesRead = oggv_read(FileHandle, (char*)dstBuffer + bytesTotal, 
 				(count - bytesTotal), 0, 2, 1, &current_section);
 

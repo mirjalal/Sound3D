@@ -22,7 +22,6 @@
 #include "Sound3D.h"
 using namespace S3D;
 #include <stdlib.h>
-#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <vector>
 #include <time.h>
@@ -42,8 +41,7 @@ int main()
 	SoundStream* stream1 = new SoundStream(); // this is a soundstream, the audio is obviously streamed and not loaded whole
 	stream1->Load("buddhist_01.ogg"); // buddhist_01.ogg
 
-	ManagedSoundStream* stream2 = new ManagedSoundStream(); // managed soundstreams are auto-streamed in a separate thread
-	stream2->Load("ambient_forest.ogg");
+	SoundStream* stream2 = new SoundStream("ambient_forest.ogg"); // soundstreams are auto-streamed in a separate thread
 
 	printf("Controls:\n");
 	printf("1 - Create Explosion\n");
@@ -59,20 +57,6 @@ int main()
 
 	while (true)
 	{
-		// there are three ways to stream
-		// #1 - Check individual sounds to stream
-		for (Sound* sound : activeSounds) // go through all active sounds
-		{
-			if (sound->IsStreamable()) // if the sound is streamable
-				sound->Stream(); // Data is only streamed if the previous soundbuffer in the queue was processed, so this method can be called many times.
-		}
-
-		// #2 - Check the specific SoundStreams to stream all bound Sounds
-		stream1->Stream();
-		
-		// #3 - Use a ManagedSoundStream, which runs in a managed stream
-
-
 		// check for keypresses
 		if (keyDown('1')) // most minimalistic example
 		{
@@ -111,13 +95,13 @@ int main()
 			// #2 - Change the gain of the global listener
 			//      This value has no limited range: [0.0 - Any], the software must enforce its own bounds on this
 			//      because the sound will easily start distorting beyond 2.0
-			Listener::Gain(Listener::Gain() + 0.1f);
+			Listener::Volume(Listener::Volume() + 0.1f);
 		}
 		else if (keyDown(VK_DOWN))
 		{
 			//for(Sound* sound : activeSounds)
 			//	sound->Volume(sound->Volume() - 0.1f);
-			Listener::Gain(Listener::Gain() - 0.1f);
+			Listener::Volume(Listener::Volume() - 0.1f);
 		}
 		else if (keyDown(VK_ESCAPE))
 			break;
@@ -134,7 +118,7 @@ int main()
 			++i;
 		}
 
-		updateStats(activeSounds.size(), Listener::Gain());
+		updateStats(activeSounds.size(), Listener::Volume());
 
 		Sleep(50); // sleep a bit..
 	}

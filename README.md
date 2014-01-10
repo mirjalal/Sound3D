@@ -1,7 +1,7 @@
 Sound3D
 =======
 
-An open source 3D Audio Library built upon OpenAL, supports *.wav, *.mp3, *.ogg file streaming, 
+An open source 3D Audio Library built upon Microsoft XAudio2 (v7), supports *.wav, *.mp3, *.ogg file streaming, 
 shared buffers or streams between different sound objects and has a simple, yet well documented API.
 
 You can easily buffer or stream sound files and play them as simple audio or 3D positional audio.
@@ -19,7 +19,7 @@ Currently supported features:
 
 Planned features:
 	- EAX effects support
-	- Doppler effect / sound speed OpenAL interface
+	- Doppler effect / sound speed interface
 
 Todo:
 	- Finish sound cone documentation
@@ -30,4 +30,4 @@ Dependencies: (just copy these to your executable directory)
 	- vorbisfile.dll, vorbis.dll, ogg.dll (all 3 required for OGG loading, if not found, all OGG loads will fail)
 
 
-How to get started? - Compile and run "sample.cpp", it contains everything you need to get started.
+How to get started? - Compile and run "Sample", it contains everything you need.

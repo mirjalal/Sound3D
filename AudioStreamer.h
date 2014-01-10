@@ -109,6 +109,11 @@ public:
 	 */
 	inline int Position() const { return StreamPos; }
 
+	/**
+	 * @return Number of PCM bytes still available in the stream
+	 */
+	inline int Available() const { return StreamSize - StreamPos; }
+
 	/** 
 	 * @return TRUE if End Of Stream was reached
 	 */
