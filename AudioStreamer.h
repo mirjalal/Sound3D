@@ -35,10 +35,10 @@ protected:
 	int* FileHandle;				// internally interpreted file handle
 	int StreamSize;					// size of the audiostream in PCM bytes, not File bytes
 	int StreamPos;					// current stream position in PCM bytes
-	unsigned short SampleRate;		// frequency (or rate) of the sound data, usually 20500 or 41000 (20.5kHz / 41kHz)
+	unsigned int SampleRate;		// frequency (or rate) of the sound data, usually 20500 or 41000 (20.5kHz / 41kHz)
 	unsigned char NumChannels;		// number of channels in a sample block, usually 1 or 2 (Mono / Stereo)
-	unsigned char SampleBlockSize;	// size (in bytes) of a sample, usually 1 to 4 bytes (Mono8:1 / Stereo8:2 / Mono16:2 / Stereo16:4)
-
+	unsigned char SampleSize;		// size (in bytes) of a sample, usually 1 to 2 bytes (8bit:1 / 16bit:2)
+	unsigned char SampleBlockSize;	// size (in bytes) of a sample block: SampleSize * NumChannels
 public:
 	/**
 	 * Creates a new uninitialized AudioStreamer.
@@ -130,9 +130,19 @@ public:
 	inline int Channels() const { return int(NumChannels); }
 
 	/**
-	 * @return Size (in bytes) of a single sample. Usually 1 to 4 bytes (Mono8:1 / Stereo8:2 / Mono16:2 / Stereo16:4)
+	 * @return Size (in bytes) of a single channel sample. Usually 1 to 2 bytes (8bit:1 / 16bit:2)
 	 */
-	inline int SampleSize() const { return int(SampleBlockSize); }
+	inline int SingleSampleSize() const { return int(SampleSize); }
+
+	/**
+	 * @return Size (in bytes) of a full all channels sample. Usually 1 to 4 bytes ( Channels * SingleSampleSize : [LL][RR] )
+	 */
+	inline int FullSampleBlockSize() const { return int(SampleBlockSize); }
+
+	/**
+	 * @return Number of Bytes Per Second for the audio data in this stream
+	 */
+	inline int BytesPerSecond() const { return int(SampleRate) * int(SampleBlockSize); }
 };
 
 

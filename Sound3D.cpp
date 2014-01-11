@@ -89,7 +89,7 @@ namespace S3D
 		buffer->LoopCount = 0;		// how many times to loop the region
 		buffer->pContext = ctx;		// context of the buffer
 		indebug(ctx->RefCount()); // access the buffer Context in debug mode, to hopefully catch invalid ctx's
-		int sampleSize = strm->SampleSize();
+		int sampleSize = strm->SingleSampleSize();
 		buffer->nBytesPerSample = sampleSize;
 
 		WAVEFORMATEX& wf = buffer->wf;
@@ -98,7 +98,7 @@ namespace S3D
 		buffer->nPCMSamples = bytesRead / (sampleSize * wf.nChannels);
 		wf.nSamplesPerSec = strm->Frequency();
 		wf.wBitsPerSample = sampleSize * 8;
-		wf.nBlockAlign = wf.nChannels * sampleSize;
+		wf.nBlockAlign = (wf.nChannels * sampleSize);
 		wf.nAvgBytesPerSec = wf.nBlockAlign * wf.nSamplesPerSec;
 		wf.cbSize = sizeof(WAVEFORMATEX);
 		
@@ -108,7 +108,7 @@ namespace S3D
 	}
 
 	/**
-	 * Streams next chunk from the Stream set in XABuffer
+	 * Streams next chunk from the Stream set in XABuffer. Size is determined by existing buffer size.
 	 * @param buffer Buffer to fill with audio data
 	 * @param pos [optional] Position of the stream to stream from (in BYTES)
 	 */
@@ -130,6 +130,13 @@ namespace S3D
 	{
 		free((void*)buffer);
 		buffer = nullptr;
+	}
+
+	static int GetBuffersQueued(IXAudio2SourceVoice* source)
+	{
+		XAUDIO2_VOICE_STATE state;
+		source->GetState(&state);
+		return state.BuffersQueued;
 	}
 
 
@@ -197,11 +204,11 @@ namespace S3D
 	}
 
 	/** 
-	 * @return Size of a sample block in bytes [LL][RR] (1 to 4)
+	 * @return Size of a full sample block in bytes [LL][RR] (1 to 4)
 	 */
-	int SoundBuffer::SampleSize() const 
+	int SoundBuffer::FullSampleSize() const 
 	{
-		return xaBuffer->nBytesPerSample * xaBuffer->wf.nChannels;
+		return xaBuffer->wf.nBlockAlign;
 	}
 
 	/**
@@ -210,6 +217,14 @@ namespace S3D
 	int SoundBuffer::SizeBytes() const
 	{
 		return xaBuffer->AudioBytes;
+	}
+
+	/**
+	 * @return Number of Bytes Per Second for this audio data (Frequency * Channels * SampleBytes)
+	 */
+	int SoundBuffer::BytesPerSecond() const
+	{
+		return xaBuffer->wf.nAvgBytesPerSec;
 	}
 
 	/**
@@ -321,10 +336,11 @@ namespace S3D
 		if (so->Sound == this) // correct buffer link?
 		{
 			so->Source->Stop(); // make sure its stopped (otherwise Flush won't work)
-			so->Source->FlushSourceBuffers(); // ensure not in queue anymore
+			if (GetBuffersQueued(so->Source))
+				so->Source->FlushSourceBuffers(); // ensure not in queue anymore
 			--refCount;
 		}
-		return false;
+		return true;
 	}
 
 	/**
@@ -337,8 +353,11 @@ namespace S3D
 	{
 		if (!xaBuffer || !so->Source)
 			return false; // nothing to do here
+
 		so->Source->Stop();
-		so->Source->FlushSourceBuffers();
+		if (GetBuffersQueued(so->Source)) // only flush IF we have buffers to flush
+			so->Source->FlushSourceBuffers();
+
 		so->Source->SubmitSourceBuffer(xaBuffer);
 		return true;
 	}
@@ -381,7 +400,7 @@ namespace S3D
 	 */
 	int SoundStream::Size() const
 	{
-		return alStream ? (alStream->Size() / SampleSize()) : 0;
+		return alStream ? (alStream->Size() / FullSampleSize()) : 0;
 	}
 
 	/**
@@ -410,7 +429,7 @@ namespace S3D
 			return false;
 
 		// load the first buffer in the stream:
-		xaBuffer = CreateXABuffer(this, STREAM_BUFFERSIZE, alStream, 0);
+		xaBuffer = CreateXABuffer(this, alStream->BytesPerSecond(), alStream, 0);
 		return xaBuffer != nullptr;
 	}
 
@@ -537,7 +556,7 @@ namespace S3D
 	{
 		bool wasPlaying = so->IsPlaying();
 		// if samplepos out of bounds THEN 0 ELSE convert samplepos to bytepos
-		int bytepos = (samplepos >= Size()) ? 0 : samplepos * SampleSize();
+		int bytepos = (samplepos >= Size()) ? 0 : samplepos * xaBuffer->wf.nBlockAlign;
 		ClearStreamData(so);
 		LoadStreamData(so, bytepos);
 		if (wasPlaying) 
@@ -562,7 +581,7 @@ namespace S3D
 		e.base = e.next; // shift the base pointer forward
 		if (e.back == xaBuffer) // we can't refill xaBuffer
 		{
-			e.back = CreateXABuffer(this, STREAM_BUFFERSIZE, alStream, &e.next);
+			e.back = CreateXABuffer(this, xaBuffer->wf.nAvgBytesPerSec, alStream, &e.next);
 			if (!e.back)
 				return false; // oh no...
 		}
@@ -591,7 +610,8 @@ namespace S3D
 		int pos = streampos == -1 ? e->next : streampos; // -1: use next, else use streampos
 
 		int streamSize = alStream->Size() - pos; // lets calculate stream size from the SEEK position
-		int numBuffers = streamSize > STREAM_BUFFERSIZE ? 2 : 1;
+		int bytesPerSecond = alStream->BytesPerSecond();
+		int numBuffers = streamSize > bytesPerSecond ? 2 : 1;
 		e->base = pos;
 
 		if (pos == 0) // pos 0 means we load alBuffer
@@ -601,13 +621,13 @@ namespace S3D
 		}
 		else // load at arbitrary position
 		{
-			e->front = CreateXABuffer(this, STREAM_BUFFERSIZE, alStream, &pos);
+			e->front = CreateXABuffer(this, bytesPerSecond, alStream, &pos);
 			so->Source->SubmitSourceBuffer(e->front);
 		}
 
 		if (numBuffers == 2) // also load a backbuffer
 		{
-			e->back = CreateXABuffer(this, STREAM_BUFFERSIZE, alStream, &pos); 
+			e->back = CreateXABuffer(this, bytesPerSecond, alStream, &pos); 
 			so->Source->SubmitSourceBuffer(e->back);
 		}
 		e->next = pos;  // pos variable was updated by CreateXABuffer
@@ -621,7 +641,9 @@ namespace S3D
 	void SoundStream::ClearStreamData(SoundObject* so)
 	{
 		so->Source->Stop();
-		so->Source->FlushSourceBuffers();
+		if (GetBuffersQueued(so->Source)) // only flush if we have something to flush
+			so->Source->FlushSourceBuffers();
+
 		if (SO_ENTRY* e = GetSOEntry(so))
 		{
 			if (e->front && e->front != xaBuffer)
@@ -781,13 +803,17 @@ namespace S3D
 	 */
 	void SoundObject::Play()
 	{
-		if (IsPlaying()) 
-			Rewind();			// rewind to start of stream and continue playing
+		if (State->isPlaying) Rewind();		// rewind to start of stream and continue playing
 		else if (Source)
 		{
 			State->isPlaying = true;
 			State->isPaused = false;
-			Source->Start(); // continue if paused or suspended
+			if (!GetBuffersQueued(Source))		// no buffers queued (track probably finished)
+			{
+				State->isInitial = true;
+				Sound->ResetBuffer(this);	// reset buffer to beginning
+			}
+			Source->Start();				// continue if paused or suspended
 		}
 	}
 
@@ -809,7 +835,8 @@ namespace S3D
 		if (Source && State->isPlaying) { // only if isPlaying, to avoid rewind
 			State->isPlaying = false;
 			State->isPaused = false;
-			Rewind(); // rewind does the Stop() and FlushBuffers() for us
+			Source->Stop();
+			Source->FlushSourceBuffers();
 		}
 	}
 	/**
@@ -830,20 +857,13 @@ namespace S3D
 	 */
 	void SoundObject::Rewind()
 	{
-		bool wasPlaying = State->isPlaying;
-		if (Sound->IsStream()) // stream
-		{
-			((SoundStream*)Sound)->ResetStream(this);
-		}
-		else // stream
-		{
-			Sound->UnbindSource(this); // simply rebind the source
-			Sound->BindSource(this);
-		}
+		Sound->ResetBuffer(this); // reset stream or buffer to initial state
 		State->isInitial = true;
-		State->isPlaying = false;
 		State->isPaused = false;
-		if (wasPlaying) Play();
+		if (State->isPlaying) // should we continue playing?
+		{
+			Source->Start();
+		}
 	}
 
 	/**
@@ -944,13 +964,13 @@ namespace S3D
 			shallow.PlayBegin = seekpos;
 			shallow.PlayLength = shallow.nPCMSamples - seekpos;
 
-			bool wasPlaying = State->isPlaying;
-			State->isPlaying = false;
 			State->isPaused = false;
 			Source->Stop();
-			Source->FlushSourceBuffers();
+			if (GetBuffersQueued(Source)) // only flush if there is something to flush
+				Source->FlushSourceBuffers();
 			Source->SubmitSourceBuffer(&shallow);
-			if (wasPlaying) Play();
+			if (State->isPlaying) 
+				Source->Start();
 		}
 	}
 

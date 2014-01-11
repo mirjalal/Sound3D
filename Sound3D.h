@@ -55,7 +55,7 @@ class SoundObject;
 struct XABuffer : XAUDIO2_BUFFER
 {
 	WAVEFORMATEX wf;		// wave format descriptor
-	int nBytesPerSample;	// number of bytes per single sample
+	int nBytesPerSample;	// number of bytes per single audio sample (1 or 2 bytes)
 	int nPCMSamples;		// number of PCM samples in the entire buffer
 	unsigned wfHash;		// waveformat pseudo-hash
 };
@@ -116,14 +116,19 @@ public:
 	int Channels() const;	
 
 	/** 
-	 * @return Size of a sample block in bytes [LL][RR] (1 to 4)
+	 * @return Size of a full sample block in bytes [LL][RR] (1 to 4)
 	 */
-	int SampleSize() const;
+	int FullSampleSize() const;
 
 	/**
 	 * @return Size of this SoundBuffer or SoundStream in BYTES
 	 */
 	int SizeBytes() const;
+
+	/**
+	 * @return Number of Bytes Per Second for this audio data (Frequency * Channels * SampleBytes)
+	 */
+	int BytesPerSecond() const;
 
 	/**
 	 * @return Size of this SoundBuffer in PCM SAMPLES
@@ -218,7 +223,6 @@ protected:
 		{
 		} 
 	};
-	static const int STREAM_BUFFERSIZE = 65536;	// 64KB
 	
 	std::vector<SO_ENTRY> alSources;	// bound sources
 	AudioStreamer* alStream;			// streamer object
@@ -372,6 +376,8 @@ class SoundObject
 protected:
 	friend class SoundBuffer;			// give soundbuffer access to the internals of this object
 	friend class SoundStream;			// give soundstream access to the internals of this object
+	friend struct SoundObjectState;		// allow some control for the State object
+
 	SoundBuffer* Sound;					// soundbuffer or stream to use
 	IXAudio2SourceVoice* Source;		// the sound source generator (interfaces XAudio2 to generate waveforms)
 	SoundObjectState* State;			// Holds and manages the current state of a SoundObject

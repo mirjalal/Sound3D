@@ -22,9 +22,10 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <Windows.h> // LoadLibrary, FreeLibrary
-#include <stdio.h> // fopen
-#include <stdlib.h> // printf
+#include <Windows.h>	// LoadLibrary, FreeLibrary
+#include <stdio.h>		// fopen
+#include <stdlib.h>		// printf
+#include <sys/types.h>	// off_t
 
 #ifdef _DEBUG
 	#define indebug(x) x
@@ -39,7 +40,43 @@
 static inline void* operator new(size_t sz, void* dst) { return dst; }
 static inline void operator delete(void* mem, void* dst) { ; }
 
-namespace S3D {
+namespace S3D 
+{
+
+	//// Low Latency File IO straight to Windows API, with no beating around the bush
+
+	// opens a file with read-only rights
+	inline void* file_open_ro(const char* filename)
+	{
+		void* fh = CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (fh == INVALID_HANDLE_VALUE) return NULL;
+		return fh;
+	}
+	// close the file
+	inline int file_close(void* handle)
+	{
+		CloseHandle(handle);
+		return 0;
+	}
+	// reads bytes from an opened file
+	inline int file_read(void* handle, void* dst, size_t size)
+	{
+		DWORD bytesRead;
+		ReadFile(handle, dst, size, &bytesRead, NULL);
+		return (int)bytesRead;
+	}
+	// seeks the file pointer
+	inline off_t file_seek(void* handle, off_t offset, int whence)
+	{
+		return SetFilePointer(handle, offset, NULL, whence);
+	}
+	// tells the current file position
+	inline off_t file_tell(void* handle)
+	{
+		return SetFilePointer(handle, 0, NULL, FILE_CURRENT);
+	}
+
+
 
 
 	////
@@ -158,23 +195,42 @@ namespace S3D {
 
 #pragma region WAVStreamer
 
+struct RIFFCHUNK
+{
+	union {
+		int ID;			// chunk ID
+		char IDStr[4];	// chunk ID as string
+	};
+	int Size;			// chunk SIZE
+};
+
 struct WAVHEADER
 {
-	int ChunkID;			// Contains the letters "RIFF"
-	int ChunkSize;			// (SizeOfFile - 8) in bytes
-	int Format;				// Contains the letters "WAVE"
+	RIFFCHUNK Header;	// Contains the letters "RIFF" && (SizeOfFile - 8) in bytes
+	union {
+		int Format;				// Contains the letters "WAVE"
+		char FormatAsStr[4];
+	};
 	// The FMT sub-chunk
-	int SubchunkFMTID;		// Contains the letters "fmt "
-	int SubchunkFMTSize;	// This should be 16 bytes - size of the FMT subchunk
-	short AudioFormat;		// Should be 1, otherwise this file is compressed!
-	short NumChannels;		// Mono = 1, Stereo = 2
-	int SampleRate;			// 8000, 22050, 44100, etc
-	int ByteRate;			// == SampleRate * NumChannels * BitsPerSample/8
-	short BlockAlign;		// == NumChannels * BitsPerSample/8
-	short BitsPerSample;	// 8 bits == 8, 16 bits == 16, etc.
-	// The DATA sub-chunk
-	int SubchunkDATA;		// Contains the letters "data"
-	int SubchunkDATASize;		// SizeOfData == NumSamples * NumChannels * BitsPerSample/8
+	RIFFCHUNK Subchunk1;		// Contains the letters "fmt " && 16 bytes in size
+	struct {
+		short AudioFormat;		// Should be 1, otherwise this file is compressed!
+		short NumChannels;		// Mono = 1, Stereo = 2
+		int SampleRate;			// 8000, 22050, 44100, etc
+		int ByteRate;			// == SampleRate * NumChannels * BitsPerSample/8
+		short BlockAlign;		// == NumChannels * BitsPerSample/8
+		short BitsPerSample;	// 8 bits == 8, 16 bits == 16, etc.
+	};
+	RIFFCHUNK NextChunk1;		// Contains the letters "info" or "data"
+	int someData[4];
+	RIFFCHUNK NextChunk2;		// maybe this one is data?
+
+	RIFFCHUNK* getDataChunk()
+	{
+		if (NextChunk1.ID == (int)'atad') return &NextChunk1;
+		if (NextChunk2.ID == (int)'atad') return &NextChunk2;
+		return nullptr;
+	}
 };
 
 	/**
@@ -182,7 +238,7 @@ struct WAVHEADER
 	 * You should call OpenStream(file) to initialize the stream.
 	 */
 	AudioStreamer::AudioStreamer()
-		: FileHandle(0), StreamSize(0), StreamPos(0), SampleRate(0), NumChannels(0), SampleBlockSize(0)
+		: FileHandle(0), StreamSize(0), StreamPos(0), SampleRate(0), NumChannels(0), SampleSize(0), SampleBlockSize(0)
 	{
 	}
 
@@ -191,7 +247,7 @@ struct WAVHEADER
 	 * @param file Full path to the audiofile to stream
 	 */
 	AudioStreamer::AudioStreamer(const char* file)
-		: FileHandle(0), StreamSize(0), StreamPos(0), SampleRate(0), NumChannels(0), SampleBlockSize(0)
+		: FileHandle(0), StreamSize(0), StreamPos(0), SampleRate(0), NumChannels(0), SampleSize(0), SampleBlockSize(0)
 	{
 		OpenStream(file);
 	}
@@ -217,26 +273,32 @@ struct WAVHEADER
 		if (FileHandle) // dont allow reopen an existing stream
 			return false;
 		
-		if (!(FileHandle = (int*)fopen(file, "rb"))) {
+		if (!(FileHandle = (int*)file_open_ro(file))) {
 			indebug(printf("Failed to open file: \"%s\"\n", file));
 			return false; // oh well;
 		}
 
 		WAVHEADER wav;
-		if (fread(&wav, sizeof(WAVHEADER), 1, (FILE*)FileHandle) != 1) {
+		if (file_read(FileHandle, &wav, sizeof(wav)) <= 0) {
 			indebug(printf("Failed to load WAV header: \"%s\"\n", file));
 			return false; // invalid file
 		}
-		if (wav.ChunkID != (int)'FFIR' || wav.Format != (int)'EVAW') { // != "RIFF" || != "WAVE"
+		if (wav.Header.ID != (int)'FFIR' || wav.Format != (int)'EVAW') { // != "RIFF" || != "WAVE"
 			indebug(printf("Invalid WAV file header: %s\n", file));
 			return false; // invalid wav header
 		}
 
+		RIFFCHUNK* dataChunk = wav.getDataChunk();
+		if (!dataChunk) {
+			indebug(printf("Failed to find WAV <data> chunk.\n"));
+			return false; // invalid WAV file
+		}
 		// initialize essential variables
-		StreamSize = wav.SubchunkDATASize;
-		SampleRate = (unsigned short)wav.SampleRate;
+		StreamSize = dataChunk->Size;
+		SampleRate = (unsigned int)wav.SampleRate;
 		NumChannels = (unsigned char)wav.NumChannels;
-		SampleBlockSize = (unsigned char)((wav.BitsPerSample >> 3) * wav.NumChannels); // BPS/8 => SampleSize
+		SampleSize = (unsigned char)(wav.BitsPerSample >> 3);	// BPS/8 => SampleSize
+		SampleBlockSize = SampleSize * NumChannels;				// [LL][RR] (1 to 4 bytes)
 		return true; // everything went ok
 	}
 	
@@ -247,12 +309,13 @@ struct WAVHEADER
 	{
 		if (FileHandle)
 		{
-			fclose((FILE*)FileHandle);
+			file_close(FileHandle);
 			FileHandle = 0;
 			StreamSize = 0;
 			StreamPos = 0;
 			SampleRate = 0;
 			NumChannels = 0;
+			SampleSize = 0;
 			SampleBlockSize = 0;
 		}
 	}
@@ -275,7 +338,10 @@ struct WAVHEADER
 			count = dstSize; // set bytes to read bigger
 		count -= count % SampleBlockSize; // make sure count is aligned to blockSize
 
-		fread(dstBuffer, count, 1, (FILE*)FileHandle);
+		if (file_read(FileHandle, dstBuffer, count) <= 0) {
+			StreamPos = StreamSize; // set EOS
+			return 0; // no bytes read
+		}
 		StreamPos += count;
 		return count;
 	}
@@ -292,7 +358,7 @@ struct WAVHEADER
 			streampos = 0;
 		streampos -= streampos % SampleBlockSize; // align to PCM blocksize
 		int actual = streampos + sizeof(WAVHEADER); // skip the WAVHEADER
-		fseek((FILE*)FileHandle, actual, SEEK_SET);
+		file_seek(FileHandle, actual, SEEK_SET);
 		StreamPos = streampos;
 		return streampos;
 	}
@@ -311,27 +377,32 @@ struct WAVHEADER
 
 #pragma data_seg("SHARED")
 static HMODULE mpgDll = NULL;
-static void (*mpg_exit)() = 0;
-static int (*mpg_init)() = 0;
-static int* (*mpg_new)(const char* decoder, int *error) = 0;
-static int (*mpg_close)(int *mh) = 0;
-static void (*mpg_delete)(int *mh) = 0;
-static int (*mpg_open)(int *mh, const char *path) = 0;
-static int (*mpg_getformat)(int *mh, long *rate, int *channels, int *encoding) = 0;
-static size_t (*mpg_length)(int *mh) = 0;
-static size_t (*mpg_outblock)(int *mh) = 0;
-static int (*mpg_encsize)(int encoding) = 0;
-static int (*mpg_read)(int *mh, unsigned char *outmemory, size_t outmemsize, size_t *done) = 0;
-static const char* (*mpg_strerror)(int *mh) = 0;
-static int (*mpg_errcode)(int *mh) = 0;
-static const char** (*mpg_supported_decoders)() = 0;
-static size_t (*mpg_seek)(int* mh, size_t sampleOffset, int whence) = 0;
-static const char* (*mpg_current_decoder)(int* mh) = 0;
+static void (*mpg_exit)();
+static int (*mpg_init)();
+static int* (*mpg_new)(const char* decoder, int* error);
+static int (*mpg_close)(int* mh);
+static void (*mpg_delete)(int* mh);
+static int (*mpg_open_handle)(int* mh, void* iohandle);
+static int (*mpg_getformat)(int* mh, long* rate, int* channels, int* encoding);
+static size_t (*mpg_length)(int* mh);
+static size_t (*mpg_outblock)(int* mh);
+static int (*mpg_encsize)(int encoding);
+static int (*mpg_read)(int* mh, unsigned char* outmemory, size_t outmemsize, size_t* done);
+static const char* (*mpg_strerror)(int* mh);
+static int (*mpg_errcode)(int* mh);
+static const char** (*mpg_supported_decoders)();
+static size_t (*mpg_seek)(int* mh, size_t sampleOffset, int whence);
+static const char* (*mpg_current_decoder)(int* mh);
+
+typedef int (*mpg_read_func)(void*, void*, size_t);
+typedef off_t (*mpg_seek_func)(void*, off_t, int);
+typedef int (*mpg_close_func)(void*);
+static int(*mpg_replace_reader_handle)(int* mh, mpg_read_func, mpg_seek_func, mpg_close_func);
 #pragma data_seg()
 
-template<class Proc> static inline void LoadMpgProc(Proc* outProcVar, const char* procName)
+template<class Proc> static inline void LoadMpgProc(Proc& outProcVar, const char* procName)
 {
-	*outProcVar = (Proc)GetProcAddress(mpgDll, procName);
+	outProcVar = (Proc)GetProcAddress(mpgDll, procName);
 }
 static void _UninitMPG()
 {
@@ -347,22 +418,23 @@ static void _InitMPG()
 		printf("Failed to load DLL %s!\n", mpglib);
 		return;
 	}
-	LoadMpgProc(&mpg_exit, "mpg123_exit");
-	LoadMpgProc(&mpg_init, "mpg123_init");
-	LoadMpgProc(&mpg_new, "mpg123_new");
-	LoadMpgProc(&mpg_close, "mpg123_close");
-	LoadMpgProc(&mpg_delete, "mpg123_delete");
-	LoadMpgProc(&mpg_open, "mpg123_open");
-	LoadMpgProc(&mpg_getformat, "mpg123_getformat");
-	LoadMpgProc(&mpg_length, "mpg123_length");
-	LoadMpgProc(&mpg_outblock, "mpg123_outblock");
-	LoadMpgProc(&mpg_encsize, "mpg123_encsize");
-	LoadMpgProc(&mpg_read, "mpg123_read");
-	LoadMpgProc(&mpg_strerror, "mpg123_strerror");
-	LoadMpgProc(&mpg_errcode, "mpg123_errcode");
-	LoadMpgProc(&mpg_supported_decoders, "mpg123_supported_decoders");
-	LoadMpgProc(&mpg_seek, "mpg123_seek");
-	LoadMpgProc(&mpg_current_decoder, "mpg123_current_decoder");
+	LoadMpgProc(mpg_exit, "mpg123_exit");
+	LoadMpgProc(mpg_init, "mpg123_init");
+	LoadMpgProc(mpg_new, "mpg123_new");
+	LoadMpgProc(mpg_close, "mpg123_close");
+	LoadMpgProc(mpg_delete, "mpg123_delete");
+	LoadMpgProc(mpg_open_handle, "mpg123_open_handle");
+	LoadMpgProc(mpg_getformat, "mpg123_getformat");
+	LoadMpgProc(mpg_length, "mpg123_length");
+	LoadMpgProc(mpg_outblock, "mpg123_outblock");
+	LoadMpgProc(mpg_encsize, "mpg123_encsize");
+	LoadMpgProc(mpg_read, "mpg123_read");
+	LoadMpgProc(mpg_strerror, "mpg123_strerror");
+	LoadMpgProc(mpg_errcode, "mpg123_errcode");
+	LoadMpgProc(mpg_supported_decoders, "mpg123_supported_decoders");
+	LoadMpgProc(mpg_seek, "mpg123_seek");
+	LoadMpgProc(mpg_current_decoder, "mpg123_current_decoder");
+	LoadMpgProc(mpg_replace_reader_handle, "mpg123_replace_reader_handle");
 	mpg_init();
 	atexit(_UninitMPG);
 }
@@ -409,10 +481,14 @@ static void _InitMPG()
 			return false;
 
 		FileHandle = mpg_new(nullptr, nullptr);
-		if (mpg_open(FileHandle, file)) {
+		mpg_replace_reader_handle(FileHandle, file_read, file_seek, file_close);
+
+		void* iohandle = file_open_ro(file);
+		if (!iohandle) {
 			indebug(printf("Failed to open file: \"%s\"\n", file));
 			return false;
 		}
+		mpg_open_handle(FileHandle, iohandle);
 
 		int rate, numChannels, encoding;
 		if (mpg_getformat(FileHandle, (long*)&rate, &numChannels, &encoding)) {
@@ -422,6 +498,7 @@ static void _InitMPG()
 		
 		int sampleSize = mpg_encsize(encoding);
 		// get the actual PCM data size: (NumSamples * NumChannels * SampleSize)
+		SampleSize = sampleSize;
 		SampleBlockSize = numChannels * sampleSize;
 		StreamSize = mpg_length(FileHandle) * SampleBlockSize;
 		SampleRate = rate;
@@ -444,6 +521,7 @@ static void _InitMPG()
 			StreamPos = 0;
 			SampleRate = 0;
 			NumChannels = 0;
+			SampleSize = 0;
 			SampleBlockSize = 0;
 		}
 	}
@@ -514,13 +592,21 @@ static UINT64 (*oggv_pcm_tell)(void* vf) = 0;
 static UINT64 (*oggv_pcm_total)(void* vf, int i) = 0;
 static vorbis_info* (*oggv_info)(void* vf, int link) = 0;
 static vorbis_comment* (*oggv_comment)(void* vf, int link) = 0;
-static int (*oggv_open_callbacks)(void* datasource, OggVorbis_File* vf, char* initial, long ibytes, ov_callbacks cb) = 0;
+static int (*oggv_open_callbacks)(void* datasource, int* vf, char* initial, long ibytes, ov_callbacks cb) = 0;
 #pragma data_seg()
 
-static size_t oggv_read_func(void* ptr, size_t size, size_t nmemb, void* cfile) { return fread(ptr, size, nmemb, (FILE*)cfile); }
-static int oggv_seek_func(void *cfile, INT64 offset, int whence) { return fseek((FILE*)cfile, (long)offset, whence); }
-static int oggv_close_func(void *cfile) { return fclose((FILE*)cfile); }
-static long oggv_tell_func(void* cfile) { return ftell((FILE*)cfile); }
+static size_t oggv_read_func(void* ptr, size_t size, size_t nmemb, void* handle) {
+	return file_read(handle, ptr, size * nmemb);
+}
+static int oggv_seek_func(void* handle, INT64 offset, int whence) {
+	return file_seek(handle, (long)offset, whence); 
+}
+static int oggv_close_func(void* handle) {
+	return file_close(handle); 
+}
+static long oggv_tell_func(void* handle) {
+	return file_tell(handle); 
+}
 
 template<class Proc> static inline void LoadVorbisProc(Proc* outProcVar, const char* procName)
 {
@@ -586,33 +672,32 @@ static void _InitVorbis()
 	 */
 	bool OGGStreamer::OpenStream(const char* file)
 	{
-		if(!vfDll) return false; // vorbis not present
-		if(FileHandle) // dont allow reopen an existing stream
+		if (!vfDll) return false; // vorbis not present
+		if (FileHandle) // dont allow reopen an existing stream
 			return false;
 
-		FILE* f = fopen(file, "rb");
-		if(!f) {
+		void* iohandle = file_open_ro(file);
+		if (!iohandle) {
 			indebug(printf("Failed to open file: \"%s\"\n", file));
 			return false;
 		}
 		ov_callbacks cb = { oggv_read_func, oggv_seek_func, oggv_close_func, oggv_tell_func };
-		OggVorbis_File* ogg = new OggVorbis_File;
-		FileHandle = (int*)ogg;
+		FileHandle = (int*)malloc(sizeof(OggVorbis_File)); // filehandle is actually Vorbis handle
 
-		if(int err = oggv_open_callbacks(f, ogg, NULL, 0, cb)) {
+		if (int err = oggv_open_callbacks(iohandle, FileHandle, NULL, 0, cb)) {
 			const char* errmsg;
 			switch(err) {
-			case OV_EREAD: errmsg = "Error reading OGG file!"; break;
-			case OV_ENOTVORBIS: errmsg = "Not an OGG vorbis file!"; break;
-			case OV_EVERSION: errmsg = "Vorbis version mismatch!"; break;
+			case OV_EREAD:		errmsg = "Error reading OGG file!";			break;
+			case OV_ENOTVORBIS: errmsg = "Not an OGG vorbis file!";			break;
+			case OV_EVERSION:	errmsg = "Vorbis version mismatch!";		break;
 			case OV_EBADHEADER: errmsg = "Invalid vorbis bitstream header"; break;
-			case OV_EFAULT: errmsg = "Internal logic fault"; break;
+			case OV_EFAULT:		errmsg = "Internal logic fault";			break;
 			}
 			CloseStream();
 			indebug(printf("Failed to open OGG file \"%s\": %s\n", file, errmsg));
 			return false;
 		}
-		vorbis_info* info = oggv_info(ogg, -1);
+		vorbis_info* info = oggv_info(FileHandle, -1);
 		if(!info) {
 			CloseStream();
 			indebug(printf("Failed to acquire OGG stream format: \"%s\"\n", file));
@@ -620,8 +705,9 @@ static void _InitVorbis()
 		}
 		SampleRate = int(info->rate);
 		NumChannels = info->channels;
-		SampleBlockSize = 2 * NumChannels; // OGG samples are always 16-bit
-		StreamSize = (int)oggv_pcm_total(ogg, -1) * SampleBlockSize; // streamsize in total bytes
+		SampleSize = 2;						// OGG samples are always 16-bit
+		SampleBlockSize = 2 * NumChannels;	// OGG samples are always 16-bit
+		StreamSize = (int)oggv_pcm_total(FileHandle, -1) * SampleBlockSize; // streamsize in total bytes
 		return true;
 	}
 	
@@ -634,12 +720,13 @@ static void _InitVorbis()
 		if(FileHandle)
 		{
 			oggv_clear(FileHandle);
-			delete (OggVorbis_File*)FileHandle;
+			free(FileHandle);
 			FileHandle = 0;
 			StreamSize = 0;
 			StreamPos = 0;
 			SampleRate = 0;
 			NumChannels = 0;
+			SampleSize = 0;
 			SampleBlockSize = 0;
 		}
 	}

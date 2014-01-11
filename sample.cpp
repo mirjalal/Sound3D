@@ -26,60 +26,94 @@ using namespace S3D;
 #include <vector>
 #include <time.h>
 
-bool keyDown(int vkey); // TRUE if windows virtual key was down
-void updateStats(int numSounds, float volume); // updates status on console title
+bool keyDown(int vkey);										// TRUE if windows virtual key was down
+void updateStats(int numSounds, float volume, int loop);	// updates status on console title
 
 int main()
 {
-	// Sound3d - An open source 3D Audio Library
+	// Sound3D - An open source 3D Audio Library
 	// This example serves to introduce the basic concepts of this library
 	// Supported audio formats are: WAV, MP3 and OGG
 
-	SoundBuffer* buffer1 = new SoundBuffer(); // this is a static soundbuffer
-	buffer1->Load("explosion_01.ogg"); // the entire ogg file is loaded
+	SoundBuffer* buffers[5] = { 0 };
 
-	SoundStream* stream1 = new SoundStream(); // this is a soundstream, the audio is obviously streamed and not loaded whole
-	stream1->Load("buddhist_01.ogg"); // buddhist_01.ogg
+	buffers[0] = new SoundBuffer();			// This is a static SoundBuffer
+	buffers[0]->Load("explosion.ogg");		// The entire ogg file is loaded
+											// SoundBuffers are good for SMALL sound Effects
 
-	SoundStream* stream2 = new SoundStream("ambient_forest.ogg"); // soundstreams are auto-streamed in a separate thread
+	buffers[1] = new SoundStream();			// This is a SoundStream, the audio is streamed and not loaded whole
+	buffers[1]->Load("thunder.ogg");		// Each streamed chunk is exactly 1s of audio data
+											// SoundStreams are good for LARGE music or ambient files
+
+	buffers[2] = new SoundStream("forest.ogg");			// soundstreams are auto-streamed in a separate thread
+	buffers[3] = new SoundBuffer("crowdcheer.wav");		// also support WAV files
+	buffers[4] = new SoundStream("balls_of_fire.mp3");	// and MP3 files
+
 
 	printf("Controls:\n");
-	printf("1 - Create Explosion\n");
-	printf("2 - Create Buddhist\n");
-	printf("3 - Create Forest\n");
+	printf("1 - Create Explosion     (OGG Buffer)\n");
+	printf("2 - Create Thunder       (OGG Stream)\n");
+	printf("3 - Create Forest        (OGG Stream)\n");
+	printf("4 - Create Cheer         (WAV Buffer)\n");
+	printf("5 - Create Balls of Fire (MP3 Stream)\n");
+	printf("L - Toggle looping\n");
 	printf("S - Stop all sounds\n");
 	printf("UP/DOWN - Inc/Dec volume\n");
 	printf("ESC - exit\n");
 	
 	std::vector<Sound*> activeSounds; // we'll use it to keep track of generated sounds
-	clock_t start1 = clock(); // limit stream1 creation
-	clock_t start2 = clock(); // limit stream2 creation
+	clock_t start1 = clock(); // to limit stream creation time
+	clock_t start2 = clock();
+	clock_t start3 = clock();
+	bool looping = false;
 
 	while (true)
 	{
-		// check for keypresses
 		if (keyDown('1')) // most minimalistic example
 		{
-			activeSounds.push_back(new Sound(buffer1, false, true)); // sound:buffer1, loop:false, play:true
+			activeSounds.push_back(new Sound(buffers[0], looping, true)); // sound:buffer1, loop:false, play:true
 		}
 		else if (keyDown('2') && (clock()-start1) >= 1000)
 		{
 			// soundobjects can be initialized with a buffer and played later when needed
-			Sound* sound = new Sound(stream1); // sound:stream1
-			sound->Play(); // start playing the sound
+			Sound* sound = new Sound(buffers[1]);	// sound:stream1
+			sound->Play();							// start playing the sound
 			activeSounds.push_back(sound);
 			start1 = clock();
 		}
 		else if (keyDown('3') && (clock()-start2) >= 1000) 
 		{
 			// soundobjects can be empty and forced to play a new soundbuffer/stream later
-			Sound* sound = new Sound(); // just an empty soundobject
-			sound->Play(stream2, false); // sound:stream2, loop:false
+			Sound* sound = new Sound();				// just an empty soundobject
+			sound->Play(buffers[2], false);			// sound:buffers[2], loop:false
 			activeSounds.push_back(sound);
 			start2 = clock();
 		}
-		else if( keyDown('S')) // stop playing all sounds
+		else if (keyDown('4'))
 		{
+			activeSounds.push_back(new Sound(buffers[3], looping, true));
+		}
+		else if (keyDown('5') && (clock()-start3) >= 1000)
+		{
+			activeSounds.push_back(new Sound(buffers[4], looping, true));
+			start3 = clock();
+		}
+		else if (keyDown('L')) // toggle looping mode
+		{
+			looping = !looping;
+		}
+		else if (keyDown('S')) // stop playing all sounds
+		{
+			
+			for (int i = 0; i < 10; ++i) // smooth fadeout over 200ms:
+			{
+				for (Sound* sound : activeSounds) // gradually reduce all sounds by 0.05f
+					if (sound->Volume() >= 0.1f)
+						sound->Volume(sound->Volume() - 0.1f);
+				Sleep(20); // 10x20ms = 200ms
+			}
+
+			// now delete everything:
 			for(Sound* sound : activeSounds)
 				delete sound; // sound is auto-stopped
 			activeSounds.clear();
@@ -118,7 +152,7 @@ int main()
 			++i;
 		}
 
-		updateStats(activeSounds.size(), Listener::Volume());
+		updateStats(activeSounds.size(), Listener::Volume(), looping);
 
 		Sleep(50); // sleep a bit..
 	}
@@ -127,10 +161,9 @@ int main()
 		delete sound; // sound is automatically stopped upon deletion
 	activeSounds.clear();
 
-	delete buffer1;
-	delete stream1;
-	delete stream2;
-
+	for (SoundBuffer* buffer : buffers)
+		delete buffer;
+	
 	return 0;
 }
 
@@ -141,15 +174,17 @@ bool keyDown(int vkey) // TRUE if windows virtual key was pressed
 	return false;
 }
 
-void updateStats(int numSounds, float volume)
+void updateStats(int numSounds, float volume, int loop)
 {
 	static int NumSounds = -1; // set these to invalid values at first
 	static float Volume = -1.0f;
+	static int Loop = -1;
 
-	if (NumSounds != numSounds || Volume != volume)
+	if (NumSounds != numSounds || Volume != volume || Loop != loop)
 	{
 		char buffer[80];
-		sprintf(buffer, "S3D - ActiveSounds: %d   Volume: %.1f", numSounds, volume);
+		sprintf(buffer, "S3D - ActiveSounds: %d   Volume: %.1f   Loop: %s", 
+				numSounds, volume, loop ? "true" : "false");
 		SetConsoleTitleA(buffer);
 		NumSounds = numSounds;
 		Volume = volume;
