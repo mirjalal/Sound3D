@@ -461,8 +461,8 @@ namespace S3D
 		if (!xaBuffer) 
 			return false; // no data loaded yet
 
-		alSources.emplace_back(so, 0, 0); // default streamPos
-		LoadStreamData(so, 0); // load initial stream data (2 buffers)
+		alSources.emplace_back(so);				// default streamPos
+		LoadStreamData(alSources.back(), 0);	// load initial stream data (2 buffers)
 
 		++refCount;
 		return true;
@@ -481,7 +481,7 @@ namespace S3D
 		SO_ENTRY* e = GetSOEntry(so);
 		if (!e) return false; // source doesn't exist
 
-		ClearStreamData(so); // unload all buffers
+		ClearStreamData(*e); // unload all buffers
 
 		alSources.erase(alSources.begin() + (e - alSources.data()));
 		--refCount;
@@ -502,14 +502,17 @@ namespace S3D
 	/**
 	 * Streams the next Buffer block from the stream.
 	 * @param so Specific SoundObject to stream with.
-	 * @return TRUE if a buffer was streamed. FALSE if EOS()
+	 * @return TRUE if a buffer was streamed. FALSE if EOS() or stream is busy.
 	 */
 	bool SoundStream::StreamNext(SoundObject* so)
 	{
 		if (!xaBuffer) 
 			return false; // nothing to do here
 		if (SO_ENTRY* e = GetSOEntry(so))
+		{
+			if (e->busy) return false; // can't stream when stream is busy
 			return StreamNext(*e);
+		}
 		return false; // nothing to stream
 	}
 
@@ -521,8 +524,11 @@ namespace S3D
 	bool SoundStream::ResetStream(SoundObject* so)
 	{
 		// simply clear and load again, to avoid code maintenance hell
-		ClearStreamData(so);
-		return LoadStreamData(so, 0);
+		if (SO_ENTRY* e = GetSOEntry(so)) {
+			ClearStreamData(*e);
+			return LoadStreamData(*e, 0);
+		}
+		return false;
 	}
 
 	/**
@@ -548,19 +554,22 @@ namespace S3D
 	}
 
 	/**
-	 * Seeks to the specified sample position in the stream
+	 * Seeks to the specified sample position in the stream.
+	 * @note The SoundObject will stop playing and must be manually restarted!
 	 * @param so SoundObject to perform seek on
 	 * @param samplepos Position in the stream in samples [0..SoundStream::Size()]
 	 */
 	void SoundStream::Seek(SoundObject* so, int samplepos)
 	{
-		bool wasPlaying = so->IsPlaying();
-		// if samplepos out of bounds THEN 0 ELSE convert samplepos to bytepos
-		int bytepos = (samplepos >= Size()) ? 0 : samplepos * xaBuffer->wf.nBlockAlign;
-		ClearStreamData(so);
-		LoadStreamData(so, bytepos);
-		if (wasPlaying) 
-			so->Play(); // resume playback
+		if (SO_ENTRY* e = GetSOEntry(so))
+		{
+			// if samplepos out of bounds THEN 0 ELSE convert samplepos to bytepos
+			int bytepos = (samplepos >= Size()) ? 0 : samplepos * xaBuffer->wf.nBlockAlign;
+			ClearStreamData(*e);
+			LoadStreamData(*e, bytepos);
+
+		}
+
 	}
 
 	//// PROTECTED: ////
@@ -603,34 +612,32 @@ namespace S3D
 	 * @param streampos [optional] PCM byte position in stream where to seek data from. 
 	 *                  If unspecified (default -1), stream will use the current streampos
 	 */
-	bool SoundStream::LoadStreamData(SoundObject* so, int streampos)
+	bool SoundStream::LoadStreamData(SO_ENTRY& so, int streampos)
 	{
-		SO_ENTRY* e = GetSOEntry(so);
-		if (!e) return false; // nothing to do here
-		int pos = streampos == -1 ? e->next : streampos; // -1: use next, else use streampos
-
+		int pos = streampos == -1 ? so.next : streampos; // -1: use next, else use streampos
 		int streamSize = alStream->Size() - pos; // lets calculate stream size from the SEEK position
 		int bytesPerSecond = alStream->BytesPerSecond();
 		int numBuffers = streamSize > bytesPerSecond ? 2 : 1;
-		e->base = pos;
+		IXAudio2SourceVoice* source = so.obj->Source;
 
+		so.base = pos;
 		if (pos == 0) // pos 0 means we load alBuffer
 		{
 			pos += xaBuffer->AudioBytes; // update pos
-			so->Source->SubmitSourceBuffer(e->front = xaBuffer);
+			source->SubmitSourceBuffer(so.front = xaBuffer);
 		}
 		else // load at arbitrary position
 		{
-			e->front = CreateXABuffer(this, bytesPerSecond, alStream, &pos);
-			so->Source->SubmitSourceBuffer(e->front);
+			so.front = CreateXABuffer(this, bytesPerSecond, alStream, &pos);
+			source->SubmitSourceBuffer(so.front);
 		}
 
 		if (numBuffers == 2) // also load a backbuffer
 		{
-			e->back = CreateXABuffer(this, bytesPerSecond, alStream, &pos); 
-			so->Source->SubmitSourceBuffer(e->back);
+			so.back = CreateXABuffer(this, bytesPerSecond, alStream, &pos); 
+			source->SubmitSourceBuffer(so.back);
 		}
-		e->next = pos;  // pos variable was updated by CreateXABuffer
+		so.next = pos;  // pos variable was updated by CreateXABuffer
 		return true;
 	}
 
@@ -638,19 +645,22 @@ namespace S3D
 	 * [internal] Unloads all queued data for the specified SoundObject
 	 * @param so SoundObject to unqueue and unload data for
 	 */
-	void SoundStream::ClearStreamData(SoundObject* so)
+	void SoundStream::ClearStreamData(SO_ENTRY& so)
 	{
-		so->Source->Stop();
-		if (GetBuffersQueued(so->Source)) // only flush if we have something to flush
-			so->Source->FlushSourceBuffers();
+		so.busy = TRUE;
+		IXAudio2SourceVoice* source = so.obj->Source;
+		source->Stop();
+		if (GetBuffersQueued(source)) // only flush if we have something to flush
+			source->FlushSourceBuffers();
 
-		if (SO_ENTRY* e = GetSOEntry(so))
-		{
-			if (e->front && e->front != xaBuffer)
-				delete e->front, e->front = nullptr;
-			if (e->back)
-				delete e->back, e->back = nullptr;
+		if (so.front) {
+			if (so.front != xaBuffer)
+				delete so.front;
+			so.front = nullptr;
 		}
+		if (so.back)
+			delete so.back, so.back = nullptr;
+		so.busy = FALSE;
 	}
 
 
@@ -953,11 +963,11 @@ namespace S3D
 	void SoundObject::PlaybackPos(int seekpos)
 	{
 		if (!Sound) return;
-		if (Sound->IsStream())
+		if (Sound->IsStream()) // stream objects
 		{
 			((SoundStream*)Sound)->Seek(this, seekpos); // seek the stream
 		}
-		else
+		else // single buffer objects
 		{
 			// first create a shallow copy of the xaBuffer:
 			XABuffer& shallow = State->shallow = *Sound->xaBuffer;
@@ -969,9 +979,9 @@ namespace S3D
 			if (GetBuffersQueued(Source)) // only flush if there is something to flush
 				Source->FlushSourceBuffers();
 			Source->SubmitSourceBuffer(&shallow);
-			if (State->isPlaying) 
-				Source->Start();
 		}
+		if (State->isPlaying) 
+			Source->Start();
 	}
 
 	/**

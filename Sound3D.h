@@ -217,9 +217,10 @@ protected:
 
 		XABuffer* front;	// currently playing buffer - frontbuffer
 		XABuffer* back;		// enqueued backbuffer
+		BOOL busy;			// the stream is busy on an internal operation, all other operations are ignored
 
-		inline SO_ENTRY(SoundObject* obj, int base, int next) 
-			: obj(obj), base(base), next(next), front(0), back(0)
+		inline SO_ENTRY(SoundObject* obj) 
+			: obj(obj), base(0), next(0), front(0), back(0), busy(0)
 		{
 		} 
 	};
@@ -302,7 +303,7 @@ public:
 	/**
 	 * Streams the next Buffer block from the stream.
 	 * @param so Specific SoundObject to stream with.
-	 * @return TRUE if a buffer was streamed. FALSE if EOS()
+	 * @return TRUE if a buffer was streamed. FALSE if EOS() or stream is busy.
 	 */
 	bool StreamNext(SoundObject* so);
 
@@ -319,7 +320,8 @@ public:
 	SO_ENTRY* GetSOEntry(const SoundObject* so) const;
 
 	/**
-	 * Seeks to the specified sample position in the stream
+	 * Seeks to the specified sample position in the stream.
+	 * @note The SoundObject will stop playing and must be manually restarted!
 	 * @param so SoundObject to perform seek on
 	 * @param samplepos Position in the stream in samples [0..SoundStream::Size()]
 	 */
@@ -337,17 +339,17 @@ protected:
 	/**
 	 * [internal] Load streaming data into the specified SoundObject
 	 * at the optionally specified streamposition.
-	 * @param so SoundObject to queue with stream data
+	 * @param so SO_ENTRY handle to queue with stream data
 	 * @param streampos [optional] PCM byte position in stream where to seek data from. 
 	 *                  If unspecified (default -1), stream will use the current streampos
 	 */
-	bool LoadStreamData(SoundObject* so, int streampos = -1);
+	bool LoadStreamData(SO_ENTRY& so, int streampos = -1);
 
 	/**
 	 * [internal] Unloads all queued data for the specified SoundObject
-	 * @param so SoundObject to unqueue and unload data for
+	 * @param so SO_ENTRY handle to unqueue and unload data for
 	 */
-	void ClearStreamData(SoundObject* so);
+	void ClearStreamData(SO_ENTRY& so);
 };
 
 
